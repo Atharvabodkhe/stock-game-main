@@ -1087,17 +1087,6 @@ function Game() {
           )}
 
           <div className="flex flex-col md:flex-row gap-4 justify-center">
-            {personalityReport && (
-              <button
-                onClick={() => {
-                  // Toggle showing the report
-                  setError(error ? null : personalityReport);
-                }}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg transition-colors"
-              >
-                {error === personalityReport ? 'Hide Report' : 'View Trading Analysis'}
-              </button>
-            )}
             <button
               onClick={() => navigate('/dashboard')}
               className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg transition-colors"

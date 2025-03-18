@@ -821,9 +821,6 @@ function AdminDashboard() {
   // Add a function to load completed rooms
   const loadCompletedRooms = async () => {
     try {
-      setError(null);
-      console.log('Loading completed rooms');
-      
       const { data, error } = await supabase
         .from('game_rooms')
         .select(`
@@ -838,16 +835,117 @@ function AdminDashboard() {
         `)
         .eq('status', 'completed')
         .order('ended_at', { ascending: false });
-        
+
       if (error) throw error;
-      
-      console.log(`Found ${data?.length || 0} completed rooms`);
       setCompletedRooms(data || []);
-      setShowCompletedRooms(true);
     } catch (error) {
       console.error('Error loading completed rooms:', error);
-      setError('Failed to load completed rooms');
     }
+  };
+
+  // Add real-time subscription for completed rooms
+  useEffect(() => {
+    loadCompletedRooms();
+
+    const completedRoomsSubscription = supabase
+      .channel('completed_rooms_changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'game_rooms',
+          filter: 'status=eq.completed'
+        },
+        (payload) => {
+          console.log('Completed room change received:', payload);
+          loadCompletedRooms();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      completedRoomsSubscription.unsubscribe();
+    };
+  }, []);
+
+  // Modify the results section to only show for admins
+  const renderResults = () => {
+    if (!isAdmin) {
+      return (
+        <div className="text-center text-gray-400 mt-4">
+          Only administrators can view detailed game results.
+        </div>
+      );
+    }
+
+    return (
+      <div className="mt-8">
+        <h3 className="text-xl font-semibold mb-4">Game Results</h3>
+        <div className="bg-gray-800 rounded-lg overflow-hidden">
+          <table className="w-full">
+            <thead>
+              <tr className="bg-gray-700">
+                <th className="py-3 px-4 text-left">Rank</th>
+                <th className="py-3 px-4 text-left">Player</th>
+                <th className="py-3 px-4 text-right">Final Balance</th>
+                <th className="py-3 px-4 text-center">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.map((result) => (
+                <tr key={result.id} className="border-t border-gray-700">
+                  <td className="py-3 px-4">
+                    {result.rank === 1 ? '🥇' : 
+                     result.rank === 2 ? '🥈' : 
+                     result.rank === 3 ? '🥉' : 
+                     `#${result.rank}`}
+                  </td>
+                  <td className="py-3 px-4">{result.user?.name || 'Unknown Player'}</td>
+                  <td className="py-3 px-4 text-right">${result.final_balance.toFixed(2)}</td>
+                  <td className="py-3 px-4 text-center">
+                    <button
+                      onClick={() => setShowReport(result.id)}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                    >
+                      View Report
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  // Modify the completed rooms section to show real-time updates
+  const renderCompletedRooms = () => {
+    if (!isAdmin) return null;
+
+    return (
+      <div className="mt-8">
+        <h2 className="text-2xl font-bold mb-4">Completed Rooms</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {completedRooms.map((room) => (
+            <div key={room.id} className="bg-gray-800 rounded-lg p-4">
+              <h3 className="text-lg font-semibold mb-2">{room.name}</h3>
+              <p className="text-gray-400 mb-2">Completed at: {room.ended_at ? new Date(room.ended_at).toLocaleString() : 'Unknown'}</p>
+              <button
+                onClick={() => {
+                  setSelectedRoom(room.id);
+                  loadResults(room.id);
+                }}
+                className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors w-full"
+              >
+                View Results
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   };
 
   if (loading) {
@@ -1259,90 +1357,7 @@ function AdminDashboard() {
           </div>
         </div>
 
-        {/* Completed Rooms Section */}
-        {showCompletedRooms && (
-          <div className="bg-gray-800 p-6 rounded-lg mb-8">
-            <h2 className="text-xl font-semibold mb-4 text-white">Completed Rooms</h2>
-            
-            {completedRooms.length === 0 ? (
-              <p className="text-gray-400">No completed rooms found.</p>
-            ) : (
-              <div className="grid grid-cols-1 gap-4">
-                {completedRooms.map((room) => (
-                  <div key={room.id} className="bg-gray-700 p-4 rounded-lg">
-                    <div className="flex justify-between items-center mb-2">
-                      <h3 className="text-lg font-semibold">{room.name}</h3>
-                      <div className="flex items-center gap-2">
-                        <span className="bg-purple-600 text-white px-2 py-1 rounded text-sm">
-                          Completed
-                        </span>
-                        <span className="text-gray-400 text-sm">
-                          {new Date(room.ended_at || '').toLocaleString()}
-                        </span>
-                      </div>
-                    </div>
-                    
-                    <button
-                      onClick={() => loadResults(room.id)}
-                      className="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg transition-colors mt-2"
-                    >
-                      View Results
-                    </button>
-                    
-                    {selectedRoom === room.id && results.length > 0 && (
-                      <div className="mt-4 bg-gray-800 p-4 rounded-lg">
-                        <h4 className="text-lg font-semibold mb-4">Game Results</h4>
-                        <div className="space-y-4">
-                          {results.map((result) => (
-                            <div key={result.id} className="bg-gray-700 p-4 rounded-lg">
-                              <div className="flex justify-between items-center">
-                                <div className="flex items-center gap-4">
-                                  <div className={`text-2xl font-bold ${
-                                    result.rank === 1 ? 'text-yellow-500' :
-                                    result.rank === 2 ? 'text-gray-400' :
-                                    result.rank === 3 ? 'text-amber-700' :
-                                    'text-gray-500'
-                                  }`}>
-                                    #{result.rank}
-                                  </div>
-                                  <div>
-                                    <p className="font-semibold">{result.user?.name || 'Unknown'}</p>
-                                    <p className="text-sm text-gray-400">{result.user?.email || 'Unknown'}</p>
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-4">
-                                  <div className="text-green-500 font-bold">
-                                    ${result.final_balance.toFixed(2)}
-                                  </div>
-                                  <button
-                                    onClick={() => setShowReport(result.id)}
-                                    className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded"
-                                  >
-                                    <FileText size={16} />
-                                    Report
-                                  </button>
-                                </div>
-                              </div>
-                              
-                              {showReport === result.id && result.game_session?.personality_report && (
-                                <div className="mt-4 bg-gray-600 p-3 rounded">
-                                  <h5 className="font-semibold mb-2">Trading Analysis</h5>
-                                  <p className="text-gray-300 whitespace-pre-wrap">
-                                    {result.game_session.personality_report}
-                                  </p>
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+        {renderCompletedRooms()}
       </div>
     </div>
   );
