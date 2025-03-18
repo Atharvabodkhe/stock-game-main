@@ -6,6 +6,22 @@ import { useGameStore } from '../store/gameStore';
 import { generatePersonalityReport } from '../lib/groq';
 import { TrendingUp, TrendingDown, Minus, RotateCcw, Timer, DollarSign, AlertTriangle } from 'lucide-react';
 
+const PauseOverlay = () => (
+  <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
+    <div className="bg-gray-800 p-8 rounded-xl shadow-lg max-w-md text-center">
+      <h2 className="text-2xl font-bold text-white mb-4">Game Paused</h2>
+      <p className="text-gray-300 mb-6">
+        The admin has paused the game. Please wait while the game is resumed.
+      </p>
+      <div className="animate-pulse text-yellow-500 flex items-center justify-center">
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      </div>
+    </div>
+  </div>
+);
+
 function Game() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -36,6 +52,9 @@ function Game() {
   const loadingTimeout = useRef<NodeJS.Timeout | null>(null);
   // Add a flag to track if completion process has started
   const [completionProcessStarted, setCompletionProcessStarted] = useState(false);
+  
+  // Track recently updated stocks for visual feedback
+  const [recentUpdates, setRecentUpdates] = useState<{[key: string]: boolean}>({});
 
   // Safe loading state setter with debounce
   const setLoadingWithDebounce = useCallback((isLoading: boolean) => {
@@ -66,12 +85,23 @@ function Game() {
     gameActions,
     gameCompleted,
     autoUpdateEnabled,
+    isLoading,
+    isPaused,
+    pausedAt,
+    playerHoldings,
     updateStocks,
     addAction,
     updateBalance,
     nextLevel,
     resetGame,
     setGameCompleted,
+    fetchInitialData,
+    setupRealtimeSubscriptions,
+    cleanupRealtimeSubscriptions,
+    buyStock,
+    sellStock,
+    getStockAvgPrice,
+    getStockQuantity
   } = useGameStore();
 
   // Ensure display level is updated whenever currentLevel changes
@@ -79,7 +109,29 @@ function Game() {
     setDisplayLevel(currentLevel + 1);
   }, [currentLevel]);
 
+  // Initialize game data from database when component mounts
+  useEffect(() => {
+    fetchInitialData();
+    setupRealtimeSubscriptions();
+    
+    // Cleanup subscriptions when component unmounts
+    return () => {
+      cleanupRealtimeSubscriptions();
+    };
+  }, [fetchInitialData, setupRealtimeSubscriptions, cleanupRealtimeSubscriptions]);
+
+  // Add a separate effect to update loading state when store loading state changes
+  useEffect(() => {
+    setLoadingWithDebounce(isLoading);
+  }, [isLoading, setLoadingWithDebounce]);
+
   const handleNextLevel = useCallback(() => {
+    // Don't allow level advancement if game is paused
+    if (isPaused || gameCompleted || levelAdvanceLock) {
+      console.log('Game paused or locked, ignoring level advancement request');
+      return;
+    }
+    
     // Don't advance if the level lock is active
     if (levelAdvanceLock) {
       console.log('Level advance locked, ignoring advancement request');
@@ -120,7 +172,7 @@ function Game() {
     setTimeout(() => {
       setLevelAdvanceLock(false);
     }, 1000);
-  }, [currentLevel, nextLevel, setGameCompleted, levelAdvanceLock]);
+  }, [currentLevel, nextLevel, setGameCompleted, levelAdvanceLock, isPaused, gameCompleted]);
 
   const checkAuth = useCallback(async () => {
     try {
@@ -445,18 +497,49 @@ function Game() {
   }, [actionsCount, gameCompleted, currentLevel, levelAdvanceLock]);
 
   const handleAction = async (stockName: string, action: string, price: number) => {
-    if (gameCompleted || levelAdvanceLock) return;
+    // Don't allow actions if game is paused, completed, or level is locked
+    if (isPaused || gameCompleted || levelAdvanceLock) return;
 
     try {
       setError(null);
-      const amount = action === 'buy' ? -price : action === 'sell' ? price : 0;
+      
+      let amount = 0;
+      let transactionPrice = price;
+      
+      if (action === 'buy') {
+        // Use buyStock to calculate the average price and track holdings
+        // We're buying 1 share for now (could be parameterized later)
+        const quantity = 1;
+        const totalCost = buyStock(stockName, quantity);
+        amount = -totalCost; // Negative because we're spending money
+        transactionPrice = totalCost / quantity; // Use actual price paid
+      } else if (action === 'sell') {
+        // Use sellStock to update holdings and calculate return
+        // We're selling 1 share for now (could be parameterized later)
+        const quantity = 1;
+        // Check if user has enough shares to sell
+        if (getStockQuantity(stockName) < quantity) {
+          setError(`You don't own any shares of ${stockName} to sell.`);
+          return;
+        }
+        
+        const saleValue = sellStock(stockName, quantity);
+        amount = saleValue; // Positive because we're receiving money
+        transactionPrice = saleValue / quantity; // Use actual price received
+      }
+      
+      // Update the balance
       updateBalance(amount);
       
+      // Log the action with the actual price used in the transaction
       const actionData = {
         level: currentLevel,
         stock_name: stockName,
         action,
-        price,
+        price: transactionPrice,
+        quantity: 1, // Hardcoded to 1 for now, could be parameterized
+        avg_price: getStockAvgPrice(stockName),
+        owned_quantity: getStockQuantity(stockName),
         timestamp: new Date().toISOString(),
       };
       
@@ -916,9 +999,14 @@ function Game() {
 
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
+      const price = payload[0].value;
+      const data = payload[0].payload;
       return (
         <div className="bg-gray-800 p-3 rounded-lg border border-gray-700">
-          <p className="text-green-500 font-semibold">${payload[0].value.toFixed(2)}</p>
+          {data.level && <p className="text-gray-400 text-xs mb-1">Level {data.level}</p>}
+          <p className="text-green-500 font-semibold">
+            ${typeof price === 'number' ? price.toFixed(2) : price}
+          </p>
         </div>
       );
     }
@@ -1034,6 +1122,62 @@ function Game() {
   // Check if we should show the completion screen, prioritizing this over other states
   const shouldShowCompletionScreen = showCompletionScreen || 
     (gameCompleted && sessionId && localStorage.getItem(`game_completed_${sessionId}`) === 'true');
+
+  // Add a useEffect to handle the timer when the game is paused
+  useEffect(() => {
+    let timer: NodeJS.Timeout | null = null;
+    
+    if (!isPaused && !gameCompleted && timeLeft > 0) {
+      timer = setInterval(() => {
+        setTimeLeft(prev => {
+          if (prev <= 1) {
+            if (timer) clearInterval(timer);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [timeLeft, isPaused, gameCompleted]);
+
+  // Update real-time subscription handling to identify recent updates
+  useEffect(() => {
+    // Previous useEffect for initializing game data
+    fetchInitialData();
+    setupRealtimeSubscriptions();
+    
+    // Set up a listener for stock price changes
+    const handleStockUpdate = (updatedStock: any) => {
+      if (updatedStock && updatedStock.name) {
+        // Mark this stock as recently updated
+        setRecentUpdates(prev => ({
+          ...prev,
+          [updatedStock.name]: true
+        }));
+        
+        // Clear the recent update indicator after 3 seconds
+        setTimeout(() => {
+          setRecentUpdates(prev => ({
+            ...prev,
+            [updatedStock.name]: false
+          }));
+        }, 3000);
+      }
+    };
+    
+    // Add our custom event listener
+    window.addEventListener('stock-price-updated', (e: any) => handleStockUpdate(e.detail));
+    
+    // Cleanup subscriptions and event listener when component unmounts
+    return () => {
+      cleanupRealtimeSubscriptions();
+      window.removeEventListener('stock-price-updated', (e: any) => handleStockUpdate(e.detail));
+    };
+  }, [fetchInitialData, setupRealtimeSubscriptions, cleanupRealtimeSubscriptions]);
 
   // Special case rendering for completion screen
   if (shouldShowCompletionScreen) {
@@ -1224,13 +1368,17 @@ function Game() {
             const hasActed = gameActions.some(
               action => action.level === currentLevel && action.stock_name === stock.name
             );
+            
+            // Check if this stock was recently updated
+            const wasRecentlyUpdated = recentUpdates[stock.name];
 
             return (
-              <div key={stock.name} className="bg-gray-800 rounded-lg p-6">
+              <div key={stock.name} className={`bg-gray-800 rounded-lg p-6 ${wasRecentlyUpdated ? 'ring-2 ring-blue-500 transition-all duration-500' : ''}`}>
                 <div className="flex justify-between items-center mb-4">
                   <h3 className="text-lg font-semibold text-white">{stock.name}</h3>
                   <div className="flex items-center gap-2">
                     <span className={`text-xl font-bold ${
+                      wasRecentlyUpdated ? 'text-blue-400' :
                       stock.price > stock.previousPrice
                         ? 'text-green-500'
                         : stock.price < stock.previousPrice
@@ -1238,6 +1386,11 @@ function Game() {
                         : 'text-white'
                     }`}>
                       ${stock.price.toFixed(2)}
+                      {wasRecentlyUpdated && (
+                        <span className="ml-2 text-xs text-blue-400 animate-pulse">
+                          Updated
+                        </span>
+                      )}
                     </span>
                     {stock.price > stock.previousPrice ? (
                       <TrendingUp className="text-green-500" size={20} />
@@ -1251,11 +1404,17 @@ function Game() {
 
                 <div className="h-[150px] mb-4">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={stock.history.map((price, index) => ({ price, index }))}>
+                    <LineChart data={stock.history.map((price, index) => ({ 
+                      price, 
+                      index,
+                      // Add a level indicator for the tooltip
+                      level: Math.min(index, currentLevel) + 1
+                    }))}>
                       <Line
                         type="monotone"
                         dataKey="price"
                         stroke={
+                          wasRecentlyUpdated ? '#3B82F6' :
                           stock.price > stock.previousPrice
                             ? '#10B981'
                             : stock.price < stock.previousPrice
@@ -1263,19 +1422,62 @@ function Game() {
                             : '#9CA3AF'
                         }
                         strokeWidth={2}
-                        dot={false}
+                        // Simplify dot display to avoid type errors
+                        dot={{ r: 3, fill: '#6B7280' }}
+                        // Highlight the active dot
+                        activeDot={{ r: 6, fill: '#FBBF24' }}
                       />
-                      <Tooltip content={<CustomTooltip />} />
+                      <Tooltip 
+                        content={CustomTooltip}
+                      />
                     </LineChart>
                   </ResponsiveContainer>
+                  {/* Add a legend for the user to understand the graph */}
+                  <div className="flex justify-center items-center text-xs text-gray-400 mt-1">
+                    <div className="flex flex-wrap justify-center gap-2">
+                      <span className="flex items-center">
+                        <span className="h-2 w-2 rounded-full bg-gray-500 inline-block mr-1"></span>
+                        Price Points
+                      </span>
+                      <span className="flex items-center">
+                        <span className="h-2 w-2 rounded-full bg-yellow-400 inline-block mr-1"></span>
+                        Selected Point
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Add holdings information */}
+                <div className="mb-4 px-2 py-1 rounded bg-gray-700 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-300">Holdings:</span>
+                    <span className="text-white font-semibold">{getStockQuantity(stock.name)} shares</span>
+                  </div>
+                  {getStockQuantity(stock.name) > 0 && (
+                    <div className="flex justify-between mt-1">
+                      <span className="text-gray-300">Avg. Cost:</span>
+                      <span className="text-white font-semibold">${getStockAvgPrice(stock.name).toFixed(2)}</span>
+                    </div>
+                  )}
+                  {getStockQuantity(stock.name) > 0 && (
+                    <div className="flex justify-between mt-1">
+                      <span className="text-gray-300">Gain/Loss:</span>
+                      <span className={`font-semibold ${
+                        stock.price > getStockAvgPrice(stock.name) ? 'text-green-400' : 
+                        stock.price < getStockAvgPrice(stock.name) ? 'text-red-400' : 'text-white'
+                      }`}>
+                        {((stock.price - getStockAvgPrice(stock.name)) / getStockAvgPrice(stock.name) * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-3 gap-2">
                   <button
                     onClick={() => handleAction(stock.name, 'buy', stock.price)}
-                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted}
+                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
                     className={`py-2 rounded-lg font-medium ${
-                      hasActed || actionsCount >= 3 || loading || gameCompleted
+                      hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused
                         ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                         : 'bg-green-600 hover:bg-green-700 text-white'
                     }`}
@@ -1284,9 +1486,9 @@ function Game() {
                   </button>
                   <button
                     onClick={() => handleAction(stock.name, 'sell', stock.price)}
-                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted}
+                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
                     className={`py-2 rounded-lg font-medium ${
-                      hasActed || actionsCount >= 3 || loading || gameCompleted
+                      hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused
                         ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                         : 'bg-red-600 hover:bg-red-700 text-white'
                     }`}
@@ -1295,9 +1497,9 @@ function Game() {
                   </button>
                   <button
                     onClick={() => handleAction(stock.name, 'hold', stock.price)}
-                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted}
+                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
                     className={`py-2 rounded-lg font-medium ${
-                      hasActed || actionsCount >= 3 || loading || gameCompleted
+                      hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused
                         ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                         : 'bg-yellow-600 hover:bg-yellow-700 text-white'
                     }`}
@@ -1313,9 +1515,9 @@ function Game() {
         <div className="flex justify-center">
           <button
             onClick={currentLevel >= 9 ? handleCompleteGame : handleNextLevel}
-            disabled={loading || gameCompleted || levelAdvanceLock}
+            disabled={loading || gameCompleted || levelAdvanceLock || isPaused}
             className={`px-8 py-3 rounded-lg text-lg font-semibold ${
-              loading || gameCompleted || levelAdvanceLock
+              loading || gameCompleted || levelAdvanceLock || isPaused
                 ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
                 : canAdvance
                   ? 'bg-green-600 hover:bg-green-700 text-white animate-pulse'
@@ -1329,6 +1531,8 @@ function Game() {
              `Skip to Level ${displayLevel + 1}`}
           </button>
         </div>
+
+        {isPaused && <PauseOverlay />}
       </div>
     </div>
   );
