@@ -1,10 +1,18 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { supabase } from '../lib/supabase';
 import { useGameStore } from '../store/gameStore';
 import { generatePersonalityReport } from '../lib/groq';
 import { TrendingUp, TrendingDown, Minus, RotateCcw, Timer, DollarSign, AlertTriangle } from 'lucide-react';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { LineChart, Line, Tooltip, ResponsiveContainer } from 'recharts';
+
+interface Stock {
+  name: string;
+  price: number;
+  previousPrice: number;
+  history: number[];
+  quantity?: number;
+}
 
 const PauseOverlay = () => (
   <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
@@ -33,53 +41,23 @@ function Game() {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [roomPlayerId, setRoomPlayerId] = useState<string | null>(null);
   const [savingAttempts, setSavingAttempts] = useState(0);
-  // Add a level lock to prevent rapid level advances
   const [levelAdvanceLock, setLevelAdvanceLock] = useState(false);
-  // Track currently displayed level for UI consistency
   const [displayLevel, setDisplayLevel] = useState(1);
-  // Track if we're showing the completion screen
   const [showCompletionScreen, setShowCompletionScreen] = useState(false);
-  // Track leaderboard data
   const [leaderboard, setLeaderboard] = useState<Array<{id: string, name: string, balance: number, rank: number, isCurrentPlayer: boolean}>>([]);
-  // Track personality report
   const [personalityReport, setPersonalityReport] = useState<string | null>(null);
   
-  // Keep track of the last level advancement time
   const lastLevelAdvanceTime = useRef(Date.now());
-  // Track if initialization is complete to prevent loading flicker
   const initComplete = useRef(false);
-  // Track loading state changes to prevent rapid toggling
   const loadingTimeout = useRef<NodeJS.Timeout | null>(null);
-  // Add a flag to track if completion process has started
   const [completionProcessStarted, setCompletionProcessStarted] = useState(false);
   
-  // Track recently updated stocks for visual feedback
   const [recentUpdates, setRecentUpdates] = useState<{[key: string]: boolean}>({});
-
-  // Safe loading state setter with debounce
-  const setLoadingWithDebounce = useCallback((isLoading: boolean) => {
-    // Clear any existing timeout
-    if (loadingTimeout.current) {
-      clearTimeout(loadingTimeout.current);
-      loadingTimeout.current = null;
-    }
-    
-    if (!isLoading) {
-      // When turning loading off, add a small delay to prevent flickering
-      loadingTimeout.current = setTimeout(() => {
-        setLoading(false);
-        initComplete.current = true;
-      }, 300);
-    } else if (!initComplete.current || !loading) {
-      // Only set loading to true if initialization is not complete or loading is currently false
-      setLoading(true);
-    }
-  }, [loading]);
 
   const {
     currentLevel,
     balance,
-    stocks,
+    stocks: gameStocks,
     stockPerformance,
     news,
     gameActions,
@@ -104,71 +82,75 @@ function Game() {
     getStockQuantity
   } = useGameStore();
 
-  // Ensure display level is updated whenever currentLevel changes
+  const [stockQuantities, setStockQuantities] = useState<{[key: string]: number}>({});
+
+  const setLoadingWithDebounce = useCallback((isLoading: boolean) => {
+    if (loadingTimeout.current) {
+      clearTimeout(loadingTimeout.current);
+      loadingTimeout.current = null;
+    }
+    
+    if (!isLoading) {
+      loadingTimeout.current = setTimeout(() => {
+        setLoading(false);
+        initComplete.current = true;
+      }, 300);
+    } else if (!initComplete.current || !loading) {
+      setLoading(true);
+    }
+  }, [loading]);
+
   useEffect(() => {
     setDisplayLevel(currentLevel + 1);
   }, [currentLevel]);
 
-  // Initialize game data from database when component mounts
   useEffect(() => {
     fetchInitialData();
     setupRealtimeSubscriptions();
     
-    // Cleanup subscriptions when component unmounts
     return () => {
       cleanupRealtimeSubscriptions();
     };
   }, [fetchInitialData, setupRealtimeSubscriptions, cleanupRealtimeSubscriptions]);
 
-  // Add a separate effect to update loading state when store loading state changes
   useEffect(() => {
     setLoadingWithDebounce(isLoading);
   }, [isLoading, setLoadingWithDebounce]);
 
   const handleNextLevel = useCallback(() => {
-    // Don't allow level advancement if game is paused
     if (isPaused || gameCompleted || levelAdvanceLock) {
       console.log('Game paused or locked, ignoring level advancement request');
       return;
     }
     
-    // Don't advance if the level lock is active
     if (levelAdvanceLock) {
       console.log('Level advance locked, ignoring advancement request');
       return;
     }
     
-    // Don't advance if it's been less than 500ms since the last advancement
     const now = Date.now();
     if (now - lastLevelAdvanceTime.current < 500) {
       console.log('Advancing too quickly, ignoring request');
       return;
     }
     
-    // Log the current level for debugging
     console.log(`Current level before progression: ${currentLevel} (displayed as Level ${currentLevel + 1})`);
     
-    // Check if we're at the last level (level 9, displayed as Level 10)
-    // or if the Complete Game button was clicked (currentLevel >= 9)
     if (currentLevel >= 9) {
       console.log('Reached final level or Complete Game button clicked, completing game');
       setGameCompleted(true);
       return;
     }
     
-    // Set lock to prevent multiple rapid advancements
     setLevelAdvanceLock(true);
     lastLevelAdvanceTime.current = now;
     
-    // Reset actions count and timer for the new level
     setActionsCount(0);
     setTimeLeft(60);
     
-    // Advance the level
     console.log(`Advancing to next level: ${currentLevel + 1} (will display as Level ${currentLevel + 2})`);
     nextLevel();
     
-    // Release lock after a delay
     setTimeout(() => {
       setLevelAdvanceLock(false);
     }, 1000);
@@ -191,17 +173,14 @@ function Game() {
         return;
       }
 
-      // Get session ID either from URL state or localStorage backup
       const sessionIdFromState = location.state?.sessionId;
       let finalSessionId = sessionIdFromState;
       
       console.log('Session ID from navigation state:', sessionIdFromState);
       
-      // If we don't have a session ID from state, try to find an active game session
       if (!sessionIdFromState) {
         console.log('No session ID in state, checking for active sessions');
         
-        // Check if the user has any active game sessions
         const { data: activePlayerData, error: playerError } = await supabase
           .from('room_players')
           .select('id, room_id, session_id, status')
@@ -223,12 +202,10 @@ function Game() {
         }
       }
       
-      // If we have a session ID (from either source), validate and use it
       if (finalSessionId) {
         console.log('Using game session ID:', finalSessionId);
         setSessionId(finalSessionId);
         
-        // Validate the session belongs to this user and is active
         const { data: playerData, error: playerError } = await supabase
           .from('room_players')
           .select('id, room_id, status')
@@ -244,13 +221,11 @@ function Game() {
           setRoomId(playerData.room_id);
           setRoomPlayerId(playerData.id);
           
-          // Reset the game state to ensure we start fresh
           console.log('Resetting game state to initial values');
           resetGame();
         } else {
           console.log('Session ID exists but is not valid for this user or game is not active');
           
-          // Check if the session exists but player status is wrong
           const { data: anyPlayerData } = await supabase
             .from('room_players')
             .select('id, status')
@@ -261,7 +236,6 @@ function Game() {
           if (anyPlayerData) {
             console.log('Player found but status is not in_game:', anyPlayerData.status);
             
-            // If player exists but status is wrong, try to fix it
             if (anyPlayerData.status === 'joined') {
               console.log('Attempting to update player status to in_game');
               
@@ -276,7 +250,6 @@ function Game() {
                 console.log('Player status updated to in_game');
                 setRoomPlayerId(anyPlayerData.id);
                 
-                // Retry loading room info
                 const { data: updatedPlayerData } = await supabase
                   .from('room_players')
                   .select('room_id')
@@ -293,7 +266,6 @@ function Game() {
       } else {
         console.log('No valid game session found');
         
-        // Instead of showing an error and redirecting, create a new game session
         try {
           console.log('Creating new game session for solo play');
           const { data: newSession, error: newSessionError } = await supabase
@@ -301,7 +273,7 @@ function Game() {
             .insert([
               {
                 user_id: session.user.id,
-                final_balance: 10000, // Starting balance
+                final_balance: 10000,
                 created_at: new Date().toISOString()
               }
             ])
@@ -317,7 +289,6 @@ function Game() {
             console.log('New game session created:', newSession.id);
             setSessionId(newSession.id);
             
-            // Reset the game state to ensure we start fresh
             console.log('Resetting game state for new solo session');
             resetGame();
             
@@ -327,14 +298,11 @@ function Game() {
         } catch (newSessionError) {
           console.error('Error creating new session:', newSessionError);
           setError('Failed to create a new game session. Please try again.');
-          // Wait a moment before redirecting to let the user see the error
           setTimeout(() => navigate('/dashboard'), 3000);
           return;
         }
         
-        // If we get here, something went wrong with creating a new session
         setError('No active game session found. Please return to the dashboard.');
-        // Wait a moment before redirecting to let the user see the error
         setTimeout(() => navigate('/dashboard'), 3000);
         return;
       }
@@ -344,7 +312,6 @@ function Game() {
       console.error('Error in checkAuth:', error);
       setError('An unexpected error occurred. Please try again.');
       setLoadingWithDebounce(false);
-      // Wait a moment before redirecting to let the user see the error
       setTimeout(() => navigate('/'), 3000);
     }
   }, [navigate, location.state, setLoadingWithDebounce]);
@@ -352,16 +319,14 @@ function Game() {
   useEffect(() => {
     checkAuth();
     
-    // Safety timeout to prevent infinite loading
     const safetyTimeout = setTimeout(() => {
       if (loading && !initComplete.current) {
         console.log('Safety timeout triggered to prevent infinite loading');
         setLoadingWithDebounce(false);
         setError('Game took too long to load. Please try refreshing the page.');
       }
-    }, 15000); // 15 seconds timeout
+    }, 15000);
     
-    // Cleanup function to clear any pending timeouts when component unmounts
     return () => {
       clearTimeout(safetyTimeout);
       if (loadingTimeout.current) {
@@ -370,10 +335,8 @@ function Game() {
     };
   }, [checkAuth, loading, setLoadingWithDebounce]);
 
-  // Explicitly ensure game is not marked as completed when component mounts
   useEffect(() => {
     console.log('Game component mounted, ensuring game is not marked as completed');
-    // Only reset game completion state if we're not already showing the completion screen
     if (!showCompletionScreen) {
       setGameCompleted(false);
     }
@@ -382,15 +345,12 @@ function Game() {
   useEffect(() => {
     if (gameCompleted) {
       try {
-        // Only proceed with game completion if actions have been taken
-        // OR if we're at the final level and the Complete Game button was clicked
         if (gameActions.length === 0 && currentLevel < 9) {
           console.log('Game marked as completed but no actions taken, resetting game state');
           setGameCompleted(false);
           return;
         }
         
-        // Set showCompletionScreen to true immediately to prevent flickering
         setShowCompletionScreen(true);
         
         handleGameCompletion();
@@ -403,14 +363,11 @@ function Game() {
     }
   }, [gameCompleted, setLoadingWithDebounce, currentLevel, gameActions]);
 
-  // Ensure we show the completion screen when the game is completed
   useEffect(() => {
     if (gameCompleted && !showCompletionScreen && !loading) {
       console.log('Game completed but completion screen not shown, showing it now');
-      // Use a small timeout to ensure we don't get into a loading state loop
       setTimeout(() => {
         setShowCompletionScreen(true);
-        // Also save to localStorage as a backup
         if (sessionId) {
           localStorage.setItem(`game_completed_${sessionId}`, 'true');
         }
@@ -418,25 +375,20 @@ function Game() {
     }
   }, [gameCompleted, showCompletionScreen, loading, sessionId]);
 
-  // Ensure completion screen stays visible once shown
   useEffect(() => {
     if (showCompletionScreen) {
       console.log('Completion screen is now visible, ensuring it stays visible');
-      // Set gameCompleted to true to ensure consistency
       setGameCompleted(true);
-      // Prevent any loading state changes from hiding the completion screen
       setLoadingWithDebounce(false);
     }
   }, [showCompletionScreen, setGameCompleted, setLoadingWithDebounce]);
 
-  // Add a safety timeout to force show completion screen if game is completed but stuck in loading
   useEffect(() => {
     let safetyTimeout: NodeJS.Timeout | null = null;
     
     if (gameCompleted && loading) {
       console.log('Game completed but still loading, setting safety timeout');
       
-      // Ensure we have a personality report
       if (!personalityReport) {
         setPersonalityReport("Your trading analysis is being generated. Your final balance shows your trading performance.");
       }
@@ -445,7 +397,7 @@ function Game() {
         console.log('Safety timeout triggered for game completion');
         setLoadingWithDebounce(false);
         setShowCompletionScreen(true);
-      }, 5000); // 5 seconds timeout
+      }, 5000);
     }
     
     return () => {
@@ -462,7 +414,6 @@ function Game() {
       timer = setInterval(() => {
         setTimeLeft((prev) => {
           if (prev <= 1) {
-            // Only advance if not locked and not at max level
             if (!levelAdvanceLock && currentLevel < 9) {
               handleNextLevel();
             }
@@ -484,7 +435,6 @@ function Game() {
     };
   }, [gameCompleted, autoUpdateEnabled, updateStocks, handleNextLevel, levelAdvanceLock, loading, currentLevel]);
 
-  // Replace the automatic level advancement with a notification
   const [canAdvance, setCanAdvance] = useState(false);
   
   useEffect(() => {
@@ -497,7 +447,6 @@ function Game() {
   }, [actionsCount, gameCompleted, currentLevel, levelAdvanceLock]);
 
   const handleAction = async (stockName: string, action: string, price: number) => {
-    // Don't allow actions if game is paused, completed, or level is locked
     if (isPaused || gameCompleted || levelAdvanceLock) return;
 
     try {
@@ -505,39 +454,35 @@ function Game() {
       
       let amount = 0;
       let transactionPrice = price;
+      const quantity = stockQuantities[stockName] || 1;
       
       if (action === 'buy') {
-        // Use buyStock to calculate the average price and track holdings
-        // We're buying 1 share for now (could be parameterized later)
-        const quantity = 1;
         const totalCost = buyStock(stockName, quantity);
-        amount = -totalCost; // Negative because we're spending money
-        transactionPrice = totalCost / quantity; // Use actual price paid
+        if (totalCost > balance) {
+          setError(`Insufficient funds. You need $${totalCost.toFixed(2)} to buy ${quantity} shares of ${stockName}.`);
+          return;
+        }
+        amount = -totalCost;
+        transactionPrice = totalCost / quantity;
       } else if (action === 'sell') {
-        // Use sellStock to update holdings and calculate return
-        // We're selling 1 share for now (could be parameterized later)
-        const quantity = 1;
-        // Check if user has enough shares to sell
         if (getStockQuantity(stockName) < quantity) {
-          setError(`You don't own any shares of ${stockName} to sell.`);
+          setError(`You don't own enough shares of ${stockName} to sell.`);
           return;
         }
         
         const saleValue = sellStock(stockName, quantity);
-        amount = saleValue; // Positive because we're receiving money
-        transactionPrice = saleValue / quantity; // Use actual price received
+        amount = saleValue;
+        transactionPrice = saleValue / quantity;
       }
       
-      // Update the balance
       updateBalance(amount);
       
-      // Log the action with the actual price used in the transaction
       const actionData = {
         level: currentLevel,
         stock_name: stockName,
         action,
         price: transactionPrice,
-        quantity: 1, // Hardcoded to 1 for now, could be parameterized
+        quantity,
         avg_price: getStockAvgPrice(stockName),
         owned_quantity: getStockQuantity(stockName),
         timestamp: new Date().toISOString(),
@@ -569,7 +514,6 @@ function Game() {
         }
       }
 
-      // Only increment actions count if we haven't reached 3 yet
       setActionsCount(prev => Math.min(prev + 1, 3));
       
     } catch (error) {
@@ -579,22 +523,18 @@ function Game() {
   };
 
   const handleGameCompletion = async () => {
-    // Prevent multiple executions of the completion process
     if (completionProcessStarted) {
       console.log('Game completion process already started, skipping duplicate execution');
       return;
     }
     
-    // Mark completion process as started
     setCompletionProcessStarted(true);
     
-    // Prevent completion if no actions have been taken (game just started)
-    // BUT allow completion if we're at the final level and the Complete Game button was clicked
     if (gameActions.length === 0 && currentLevel < 9) {
       console.log('Game completion triggered but no actions taken yet, resetting game state');
       setGameCompleted(false);
       setLoadingWithDebounce(false);
-      setCompletionProcessStarted(false); // Reset flag
+      setCompletionProcessStarted(false);
       return;
     }
     
@@ -602,13 +542,11 @@ function Game() {
       console.error(`Maximum save attempts (${savingAttempts}) reached, stopping retries`);
       setError('Failed to save game results after multiple attempts. Your final score is saved locally.');
       
-      // Show completion screen even if we failed to save to the database
       setLoadingWithDebounce(false);
       setShowCompletionScreen(true);
       return;
     }
 
-    // Force completion screen after 2 seconds regardless of loading state
     const forceCompletionTimeout = setTimeout(() => {
       console.log('Force completion screen after delay');
       setLoadingWithDebounce(false);
@@ -620,14 +558,12 @@ function Game() {
       setError(null);
       console.log('Starting game completion process...');
       
-      // Add a safety timeout to prevent getting stuck in loading state
       const completionTimeout = setTimeout(() => {
         console.log('Completion safety timeout triggered');
         setLoadingWithDebounce(false);
         setShowCompletionScreen(true);
-      }, 10000); // 10 seconds timeout
+      }, 10000);
       
-      // Get current user session
       const { data: { session }, error: sessionError } = await supabase.auth.getSession();
       
       if (sessionError) {
@@ -640,7 +576,6 @@ function Game() {
         throw new Error('No authenticated session found');
       }
 
-      // Generate personality report with better error handling
       let report = null;
       try {
         console.log(`Generating personality report based on ${gameActions.length} game actions...`);
@@ -650,11 +585,9 @@ function Game() {
           report = "Not enough trading activity to generate a detailed analysis.";
         } else {
           try {
-            // Make a defensive copy of the game actions to prevent reference issues
             const actionsCopy = JSON.parse(JSON.stringify(gameActions));
             report = await generatePersonalityReport(actionsCopy);
             
-            // Ensure we have a valid report
             if (!report || typeof report !== 'string' || report.trim() === '') {
               throw new Error('Empty or invalid report received');
             }
@@ -675,10 +608,8 @@ function Game() {
         report = "Trading analysis unavailable. Thank you for playing! Your final balance shows your trading performance.";
       }
 
-      // Save the personality report to state
       setPersonalityReport(report);
 
-      // Log current game state for debugging
       console.log('Game completion state:', {
         currentLevel,
         balance,
@@ -689,11 +620,9 @@ function Game() {
         reportLength: report ? report.length : 0
       });
 
-      // Break the save process into discrete steps with individual error handling
       if (sessionId) {
         console.log(`Updating existing game session (${sessionId}) with final results`);
         
-        // Step 1: Update the session with final balance and personality report
         try {
           const { error: sessionUpdateError } = await supabase
             .from('game_sessions')
@@ -714,7 +643,6 @@ function Game() {
           throw new Error(`Failed to update game session: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         
-        // Step 2: Update player status if in a room
         if (roomPlayerId) {
           try {
             console.log(`Updating room player status (${roomPlayerId}) to completed`);
@@ -733,11 +661,9 @@ function Game() {
             console.log('Player status updated successfully');
           } catch (playerUpdateError) {
             console.error('Failed to update player status:', playerUpdateError);
-            // Continue with the process even if player status update fails
           }
         }
         
-        // Step 3: Add game results entry
         try {
           console.log('Adding game result record');
           const { data: resultData, error: resultError } = await supabase
@@ -763,7 +689,6 @@ function Game() {
           throw new Error(`Failed to save game result: ${error instanceof Error ? error.message : 'Unknown error'}`);
         }
         
-        // Step 4: Update room status if all players completed
         if (roomId) {
           try {
             console.log(`Checking if all players in room ${roomId} have completed`);
@@ -780,8 +705,6 @@ function Game() {
 
             console.log(`Found ${playersData?.length || 0} players still in game`);
             
-            // Update room status to completed if this is the last player
-            // or force update if we're at the final level and clicked Complete Game
             if (!playersData || playersData.length === 0 || currentLevel >= 9) {
               console.log('All players completed or final level reached, updating room status');
               const { error: roomError } = await supabase
@@ -798,7 +721,6 @@ function Game() {
               }
               console.log('Room status updated to completed');
 
-              // Update rankings for all players
               try {
                 console.log('Calculating final rankings');
                 const { data: results, error: ranksError } = await supabase
@@ -819,7 +741,6 @@ function Game() {
                       .from('game_results')
                       .update({ 
                         rank: i + 1,
-                        // Add a timestamp to ensure the dashboard can detect the update
                         updated_at: new Date().toISOString()
                       })
                       .eq('id', results[i].id);
@@ -832,16 +753,13 @@ function Game() {
                 }
               } catch (rankingError) {
                 console.error('Error updating rankings:', rankingError);
-                // Continue even if ranking update fails
               }
             }
           } catch (roomUpdateError) {
             console.error('Error updating room status:', roomUpdateError);
-            // Continue even if room status update fails
           }
         }
         
-        // Fetch leaderboard data if in a room
         if (roomId) {
           try {
             console.log('Fetching leaderboard data');
@@ -867,7 +785,6 @@ function Game() {
                 if (entry.user && typeof entry.user === 'object' && 'name' in entry.user && typeof entry.user.name === 'string') {
                   playerName = entry.user.name;
                   
-                  // Check if this is the current player
                   if (session && 'id' in entry.user && entry.user.id === session.user.id) {
                     isCurrentPlayer = true;
                   }
@@ -882,12 +799,10 @@ function Game() {
                 };
               });
               
-              // Sort by balance (profit) in descending order
               formattedLeaderboard.sort((a, b) => b.balance - a.balance);
               
               setLeaderboard(formattedLeaderboard);
               
-              // Notify the room that the leaderboard is updated
               try {
                 await supabase.rpc('notify_leaderboard_update', { 
                   room_id: roomId 
@@ -902,7 +817,6 @@ function Game() {
           }
         }
       } else {
-        // Handle solo game (not in a room)
         try {
           console.log('Creating new game session for solo game');
           const { data: gameSession, error: sessionError } = await supabase
@@ -943,7 +857,6 @@ function Game() {
               console.log('Game actions saved successfully');
             } catch (actionsError) {
               console.error('Failed to save game actions:', actionsError);
-              // Continue even if action save fails
             }
           }
         } catch (error) {
@@ -953,45 +866,36 @@ function Game() {
       }
       
       console.log('Game completion process successful');
-      // Clear the safety timeout since we completed successfully
       clearTimeout(completionTimeout);
-      // Clear the force completion timeout
       clearTimeout(forceCompletionTimeout);
       setLoadingWithDebounce(false);
-      // Show the completion screen instead of redirecting
       setShowCompletionScreen(true);
     } catch (error) {
       console.error('Error saving game data:', error);
       
-      // Clear the force completion timeout
       clearTimeout(forceCompletionTimeout);
       
-      // Increment attempt counter and show error
       const newAttemptCount = savingAttempts + 1;
       setSavingAttempts(newAttemptCount);
       
-      // More descriptive error message
       setError(`Error saving game results. Retrying... (Attempt ${newAttemptCount}/3)`);
       setLoadingWithDebounce(false);
       
-      // Use exponential backoff for retries (1s, 2s, 4s)
       const retryDelay = Math.min(1000 * Math.pow(2, savingAttempts), 4000);
       console.log(`Will retry in ${retryDelay}ms (attempt ${newAttemptCount})`);
       
-      // If this is the last retry attempt, show the completion screen anyway
       if (newAttemptCount >= 3) {
         console.log('Final retry attempt failed, showing completion screen anyway');
-        // Set a default personality report if we don't have one
         if (!personalityReport) {
           setPersonalityReport("Unable to generate trading analysis due to connection issues. Your final balance reflects your trading performance.");
         }
         setShowCompletionScreen(true);
-        setCompletionProcessStarted(false); // Reset flag to allow retry
+        setCompletionProcessStarted(false);
         return;
       }
       
       setTimeout(() => {
-        setCompletionProcessStarted(false); // Reset flag to allow retry
+        setCompletionProcessStarted(false);
         handleGameCompletion();
       }, retryDelay);
     }
@@ -1016,18 +920,14 @@ function Game() {
   const handleCompleteGame = useCallback(() => {
     console.log('Complete Game button clicked, completing game');
     
-    // First, force set UI states to show completion screen
     setGameCompleted(true);
     setShowCompletionScreen(true);
     
-    // Persist completion state in localStorage to prevent it from disappearing
     if (sessionId) {
       localStorage.setItem(`game_completed_${sessionId}`, 'true');
     }
     
-    // Directly update room status to completed if we're in a room
     if (roomId) {
-      // Function to update room status
       const updateRoomStatus = async (attempt = 1) => {
         try {
           console.log(`Directly updating room ${roomId} status to completed (attempt ${attempt})`);
@@ -1041,9 +941,8 @@ function Game() {
             
           if (roomError) {
             console.error('Error directly updating room status:', roomError);
-            // Retry up to 3 times with exponential backoff
             if (attempt < 3) {
-              const delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+              const delay = Math.pow(2, attempt) * 1000;
               console.log(`Will retry updating room status in ${delay}ms`);
               setTimeout(() => updateRoomStatus(attempt + 1), delay);
             }
@@ -1051,7 +950,6 @@ function Game() {
             console.log('Room status successfully updated to completed');
           }
           
-          // Also update player status if we have roomPlayerId
           if (roomPlayerId) {
             const { error: playerError } = await supabase
               .from('room_players')
@@ -1068,7 +966,6 @@ function Game() {
             }
           }
           
-          // Add game results entry 
           try {
             const { data: { session } } = await supabase.auth.getSession();
             if (session && sessionId) {
@@ -1094,11 +991,9 @@ function Game() {
         }
       };
       
-      // Start the update process
       updateRoomStatus();
     }
     
-    // Force the completion screen to show after a short delay
     setTimeout(() => {
       console.log('Forcing completion screen to show after Complete Game button click');
       setLoadingWithDebounce(false);
@@ -1106,7 +1001,6 @@ function Game() {
     }, 500);
   }, [setGameCompleted, setLoadingWithDebounce, roomId, roomPlayerId, sessionId, balance]);
 
-  // Check localStorage for completion state when component mounts
   useEffect(() => {
     if (sessionId) {
       const savedCompletion = localStorage.getItem(`game_completed_${sessionId}`);
@@ -1119,11 +1013,9 @@ function Game() {
     }
   }, [sessionId, setGameCompleted, setLoadingWithDebounce]);
 
-  // Check if we should show the completion screen, prioritizing this over other states
   const shouldShowCompletionScreen = showCompletionScreen || 
     (gameCompleted && sessionId && localStorage.getItem(`game_completed_${sessionId}`) === 'true');
 
-  // Add a useEffect to handle the timer when the game is paused
   useEffect(() => {
     let timer: NodeJS.Timeout | null = null;
     
@@ -1144,22 +1036,17 @@ function Game() {
     };
   }, [timeLeft, isPaused, gameCompleted]);
 
-  // Update real-time subscription handling to identify recent updates
   useEffect(() => {
-    // Previous useEffect for initializing game data
     fetchInitialData();
     setupRealtimeSubscriptions();
     
-    // Set up a listener for stock price changes
     const handleStockUpdate = (updatedStock: any) => {
       if (updatedStock && updatedStock.name) {
-        // Mark this stock as recently updated
         setRecentUpdates(prev => ({
           ...prev,
           [updatedStock.name]: true
         }));
         
-        // Clear the recent update indicator after 3 seconds
         setTimeout(() => {
           setRecentUpdates(prev => ({
             ...prev,
@@ -1169,17 +1056,14 @@ function Game() {
       }
     };
     
-    // Add our custom event listener
     window.addEventListener('stock-price-updated', (e: any) => handleStockUpdate(e.detail));
     
-    // Cleanup subscriptions and event listener when component unmounts
     return () => {
       cleanupRealtimeSubscriptions();
       window.removeEventListener('stock-price-updated', (e: any) => handleStockUpdate(e.detail));
     };
   }, [fetchInitialData, setupRealtimeSubscriptions, cleanupRealtimeSubscriptions]);
 
-  // Special case rendering for completion screen
   if (shouldShowCompletionScreen) {
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-8">
@@ -1253,7 +1137,6 @@ function Game() {
   }
 
   if (loading) {
-    // We don't need the duplicate check for gameCompleted here since we have the shouldShowCompletionScreen check above
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
         <div className="text-center">
@@ -1364,12 +1247,11 @@ function Game() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
-          {stocks.map((stock) => {
+          {gameStocks.map((stock) => {
             const hasActed = gameActions.some(
               action => action.level === currentLevel && action.stock_name === stock.name
             );
             
-            // Check if this stock was recently updated
             const wasRecentlyUpdated = recentUpdates[stock.name];
 
             return (
@@ -1407,7 +1289,6 @@ function Game() {
                     <LineChart data={stock.history.map((price, index) => ({ 
                       price, 
                       index,
-                      // Add a level indicator for the tooltip
                       level: Math.min(index, currentLevel) + 1
                     }))}>
                       <Line
@@ -1422,9 +1303,7 @@ function Game() {
                             : '#9CA3AF'
                         }
                         strokeWidth={2}
-                        // Simplify dot display to avoid type errors
                         dot={{ r: 3, fill: '#6B7280' }}
-                        // Highlight the active dot
                         activeDot={{ r: 6, fill: '#FBBF24' }}
                       />
                       <Tooltip 
@@ -1432,7 +1311,6 @@ function Game() {
                       />
                     </LineChart>
                   </ResponsiveContainer>
-                  {/* Add a legend for the user to understand the graph */}
                   <div className="flex justify-center items-center text-xs text-gray-400 mt-1">
                     <div className="flex flex-wrap justify-center gap-2">
                       <span className="flex items-center">
@@ -1447,7 +1325,6 @@ function Game() {
                   </div>
                 </div>
 
-                {/* Add holdings information */}
                 <div className="mb-4 px-2 py-1 rounded bg-gray-700 text-sm">
                   <div className="flex justify-between">
                     <span className="text-gray-300">Holdings:</span>
@@ -1472,7 +1349,27 @@ function Game() {
                   )}
                 </div>
 
-                <div className="grid grid-cols-3 gap-2">
+                <div className="mb-4">
+                  <div className="flex items-center gap-2">
+                    <label className="text-gray-300 text-sm">Quantity:</label>
+                    <input
+                      type="number"
+                      min="1"
+                      value={stockQuantities[stock.name] || 1}
+                      onChange={(e) => {
+                        const newQuantity = Math.max(1, parseInt(e.target.value) || 1);
+                        setStockQuantities(prev => ({
+                          ...prev,
+                          [stock.name]: newQuantity
+                        }));
+                      }}
+                      className="w-20 px-2 py-1 rounded bg-gray-600 text-white text-sm"
+                      disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => handleAction(stock.name, 'buy', stock.price)}
                     disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
@@ -1486,25 +1383,14 @@ function Game() {
                   </button>
                   <button
                     onClick={() => handleAction(stock.name, 'sell', stock.price)}
-                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
+                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused || getStockQuantity(stock.name) < (stockQuantities[stock.name] || 1)}
                     className={`py-2 rounded-lg font-medium ${
-                      hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused
+                      hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused || getStockQuantity(stock.name) < (stockQuantities[stock.name] || 1)
                         ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                         : 'bg-red-600 hover:bg-red-700 text-white'
                     }`}
                   >
                     Sell
-                  </button>
-                  <button
-                    onClick={() => handleAction(stock.name, 'hold', stock.price)}
-                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
-                    className={`py-2 rounded-lg font-medium ${
-                      hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused
-                        ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                        : 'bg-yellow-600 hover:bg-yellow-700 text-white'
-                    }`}
-                  >
-                    Hold
                   </button>
                 </div>
               </div>

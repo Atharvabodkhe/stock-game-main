@@ -85,9 +85,6 @@ function AdminDashboard() {
   const [showCompletedRooms, setShowCompletedRooms] = useState(false);
   const [completedRooms, setCompletedRooms] = useState<GameRoom[]>([]);
   const [showCreateRoom, setShowCreateRoom] = useState(false);
-  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
-  const [isPausingOrResuming, setIsPausingOrResuming] = useState(false);
-  const [userNames, setUserNames] = useState<{[key: string]: string}>({});
 
   const { 
     stocks, 
@@ -358,152 +355,14 @@ function AdminDashboard() {
     }
   }, [error, retryCount]);
 
-  const initGameData = async () => {
-    try {
-      console.log('Initializing game data in database...');
-      
-      // Check if stocks table has data
-      const { count: stocksCount, error: stocksError } = await supabase
-        .from('stocks')
-        .select('*', { count: 'exact', head: true });
-
-      if (stocksError) {
-        console.error('Error checking stocks table:', stocksError);
-        return;
-      }
-
-      // If no stocks exist in the database, initialize with default values
-      if (stocksCount === 0) {
-        console.log('No stocks found in database, initializing with default values');
-        
-        // Get the stock data from the local store
-        const defaultStocks = stocks.map(stock => ({
-          name: stock.name,
-          price: stock.price,
-          created_at: new Date().toISOString()
-        }));
-        
-        // Insert default stocks
-        const { error: insertError } = await supabase
-          .from('stocks')
-          .insert(defaultStocks);
-          
-        if (insertError) {
-          console.error('Error initializing stocks data:', insertError);
-        }
-      }
-
-      // Check if level_stocks table has data
-      const { count: levelStocksCount, error: levelStocksError } = await supabase
-        .from('level_stocks')
-        .select('*', { count: 'exact', head: true });
-
-      if (levelStocksError) {
-        console.error('Error checking level_stocks table:', levelStocksError);
-        return;
-      }
-
-      // If no level stocks exist in the database, initialize with default values
-      if (levelStocksCount === 0) {
-        console.log('No level stocks found in database, initializing with default values');
-        
-        // Prepare level stocks data
-        const defaultLevelStocks = levelStocks.flatMap(level => 
-          level.stocks.map(stock => ({
-            level: level.level,
-            stock_name: stock.name,
-            price: stock.price,
-            created_at: new Date().toISOString()
-          }))
-        );
-        
-        // Insert default level stocks
-        const { error: insertError } = await supabase
-          .from('level_stocks')
-          .insert(defaultLevelStocks);
-          
-        if (insertError) {
-          console.error('Error initializing level stocks data:', insertError);
-        }
-      }
-
-      // Check if news table has data
-      const { count: newsCount, error: newsError } = await supabase
-        .from('news')
-        .select('*', { count: 'exact', head: true });
-
-      if (newsError) {
-        console.error('Error checking news table:', newsError);
-        return;
-      }
-
-      // If no news exist in the database, initialize with default values
-      if (newsCount === 0) {
-        console.log('No news found in database, initializing with default values');
-        
-        // Prepare news data
-        const defaultNews = news.map((content, level) => ({
-          level,
-          content,
-          created_at: new Date().toISOString()
-        }));
-        
-        // Insert default news
-        const { error: insertError } = await supabase
-          .from('news')
-          .insert(defaultNews);
-          
-        if (insertError) {
-          console.error('Error initializing news data:', insertError);
-        }
-      }
-      
-      console.log('Game data initialization complete');
-    } catch (error) {
-      console.error('Error initializing game data:', error);
-    }
-  };
-
   const loadInitialData = async () => {
     try {
-      setLoading(true);
-      
-      await Promise.all([
-        loadRooms(),
-        loadCompletedRooms(),
-        initGameData(), // Initialize game data in the database
-      ]);
-      
-      // Fetch the game state directly instead of using get()
-      await supabase
-        .from('game_state')
-        .select('*')
-        .order('updated_at', { ascending: false })
-        .limit(1)
-        .single()
-        .then(({ data, error }) => {
-          if (error) {
-            console.error('Error fetching game state:', error);
-          } else if (data) {
-            // Update the isPaused state based on the database value
-            setPaused(data.is_paused);
-          }
-        });
-      
-      setLoading(false);
+      setError(null);
+      await loadRooms();
       setRetryCount(0);
     } catch (error) {
       console.error('Error loading initial data:', error);
       setError('Failed to load data. Retrying...');
-      
-      if (retryCount < maxRetries) {
-        setTimeout(() => {
-          setRetryCount(prev => prev + 1);
-          loadInitialData();
-        }, 2000 * Math.pow(2, retryCount));
-      } else {
-        setLoading(false);
-      }
     }
   };
 
@@ -848,28 +707,18 @@ function AdminDashboard() {
   const handleStockPriceUpdate = (stockName: string) => {
     const price = parseFloat(newStockPrice);
     if (!isNaN(price) && price > 0) {
-      // Pass the exact price directly to updateStockPrice without formatting
       updateStockPrice(stockName, price);
       setEditingStock(null);
       setNewStockPrice('');
-      
-      // Show feedback that the price was updated
-      setFeedbackMessage(`${stockName} price updated to $${price}`);
-      setTimeout(() => setFeedbackMessage(null), 3000);
     }
   };
 
   const handleLevelStockPriceUpdate = (stockName: string, level: number) => {
     const price = parseFloat(newLevelStockPrice);
     if (!isNaN(price) && price > 0) {
-      // Pass the exact price directly to updateStockPrice without formatting
       updateStockPrice(stockName, price, level);
       setEditingLevelStock(null);
       setNewLevelStockPrice('');
-      
-      // Show feedback that the price was updated
-      setFeedbackMessage(`Level ${level+1} ${stockName} price updated to $${price}`);
-      setTimeout(() => setFeedbackMessage(null), 3000);
     }
   };
 
@@ -895,55 +744,6 @@ function AdminDashboard() {
       ...prev,
       max_players: value === '' ? 5 : Math.max(prev.min_players, Math.min(5, value))
     }));
-  };
-
-  const handlePauseResumeGame = async () => {
-    try {
-      setError(null);
-      setIsPausingOrResuming(true);
-      
-      console.log(`${isPaused ? 'Resuming' : 'Pausing'} game...`);
-      await setPaused(!isPaused);
-      
-      // Show feedback to the admin that the action was successful
-      const message = !isPaused 
-        ? 'Game paused. All players are now waiting for you to resume.' 
-        : 'Game resumed. Players can continue playing.';
-      
-      setFeedbackMessage(message);
-      
-      // Clear feedback after 3 seconds
-      setTimeout(() => {
-        setFeedbackMessage(null);
-      }, 3000);
-      
-    } catch (error) {
-      console.error('Error toggling game pause state:', error);
-      setError('Failed to update game state. Please try again.');
-    } finally {
-      setIsPausingOrResuming(false);
-    }
-  };
-
-  // Function to fetch user name when it's not available in the player data
-  const fetchUserName = async (userId: string): Promise<string> => {
-    try {
-      const { data, error } = await supabase
-        .from('users')
-        .select('name')
-        .eq('id', userId)
-        .single();
-
-      if (error || !data || !data.name) {
-        console.error('Error fetching user name:', error);
-        return 'Unknown';
-      }
-
-      return data.name;
-    } catch (error) {
-      console.error('Exception fetching user name:', error);
-      return 'Unknown';
-    }
   };
 
   // Add a priority data loader function for critical updates
@@ -1043,7 +843,7 @@ function AdminDashboard() {
     }
   };
 
-  // Effect to load completed rooms
+  // Add real-time subscription for completed rooms
   useEffect(() => {
     loadCompletedRooms();
 
@@ -1068,41 +868,6 @@ function AdminDashboard() {
       completedRoomsSubscription.unsubscribe();
     };
   }, []);
-
-  // Effect to fetch missing user names
-  useEffect(() => {
-    const fetchMissingUserNames = async () => {
-      const missingUserIds: string[] = [];
-      
-      // Get all player user_ids that need names
-      rooms.forEach(room => {
-        room.players.forEach(player => {
-          if (!player.user?.name && player.user_id && !userNames[player.user_id]) {
-            missingUserIds.push(player.user_id);
-          }
-        });
-      });
-      
-      // If no missing user IDs, no need to fetch
-      if (missingUserIds.length === 0) return;
-      
-      console.log(`Fetching names for ${missingUserIds.length} users`);
-      
-      // Fetch each user's name and update the state
-      const newNames: {[key: string]: string} = {...userNames};
-      
-      await Promise.all(
-        missingUserIds.map(async (userId) => {
-          const name = await fetchUserName(userId);
-          newNames[userId] = name;
-        })
-      );
-      
-      setUserNames(newNames);
-    };
-    
-    fetchMissingUserNames();
-  }, [rooms, userNames]);
 
   // Modify the results section to only show for admins
   const renderResults = () => {
@@ -1136,7 +901,7 @@ function AdminDashboard() {
                      result.rank === 3 ? '🥉' : 
                      `#${result.rank}`}
                   </td>
-                  <td className="py-3 px-4">{result.user?.name || (result.user_id && userNames[result.user_id]) || 'Unknown Player'}</td>
+                  <td className="py-3 px-4">{result.user?.name || 'Unknown Player'}</td>
                   <td className="py-3 px-4 text-right">${result.final_balance.toFixed(2)}</td>
                   <td className="py-3 px-4 text-center">
                     <button
@@ -1166,7 +931,7 @@ function AdminDashboard() {
           {completedRooms.map((room) => (
             <div key={room.id} className="bg-gray-800 rounded-lg p-4">
               <h3 className="text-lg font-semibold mb-2">{room.name}</h3>
-              <p className="text-gray-400 mb-2">Completed at: {room.ended_at ? new Date(room.ended_at).toLocaleString() : 'Unknown'}</p>
+              <p className="text-gray-400 mb-2">Completed at: {new Date(room.ended_at).toLocaleString()}</p>
               <button
                 onClick={() => {
                   setSelectedRoom(room.id);
@@ -1243,11 +1008,10 @@ function AdminDashboard() {
             </div>
             <div className="flex items-center gap-4">
               <button
-                onClick={handlePauseResumeGame}
-                disabled={isPausingOrResuming}
+                onClick={() => setPaused(!isPaused)}
                 className={`flex items-center gap-2 px-4 py-2 rounded-lg ${
-                  isPaused ? 'bg-green-600 hover:bg-green-700' : 'bg-yellow-600 hover:bg-yellow-700'
-                } ${isPausingOrResuming ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  isPaused ? 'bg-yellow-600 hover:bg-yellow-700' : 'bg-green-600 hover:bg-green-700'
+                }`}
               >
                 {isPaused ? (
                   <>
@@ -1396,6 +1160,20 @@ function AdminDashboard() {
         <div className="bg-gray-800 p-6 rounded-lg mb-8">
           <div className="flex justify-between items-center mb-6">
             <h2 className="text-2xl font-semibold text-white">Game Rooms</h2>
+            <div className="flex gap-4">
+              <button
+                onClick={() => setShowCreateRoom(!showCreateRoom)}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+              >
+                {showCreateRoom ? 'Cancel' : 'Create Room'}
+              </button>
+              <button
+                onClick={loadCompletedRooms}
+                className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors"
+              >
+                {showCompletedRooms ? 'Hide Completed' : 'Show Completed Rooms'}
+              </button>
+            </div>
           </div>
 
           <div className="flex gap-4 mb-6">
@@ -1509,8 +1287,8 @@ function AdminDashboard() {
                                 #{result.rank}
                               </div>
                               <div>
-                                <p className="font-semibold">{result.user?.name || (result.user_id && userNames[result.user_id]) || 'Loading...'}</p>
-                                <p className="text-sm text-gray-400">{result.user?.email || ''}</p>
+                                <p className="font-semibold">{result.user?.name || 'Unknown'}</p>
+                                <p className="text-sm text-gray-400">{result.user?.email || 'Unknown'}</p>
                               </div>
                             </div>
                             <div className="flex items-center gap-4">
@@ -1557,8 +1335,8 @@ function AdminDashboard() {
                         className="flex justify-between items-center bg-gray-600 p-2 rounded"
                       >
                         <div>
-                          <p className="font-medium">{player.user?.name || (player.user_id && userNames[player.user_id]) || 'Loading...'}</p>
-                          <p className="text-sm text-gray-400">{player.user?.email || ''}</p>
+                          <p className="font-medium">{player.user?.name || 'Unknown'}</p>
+                          <p className="text-sm text-gray-400">{player.user?.email || 'Unknown'}</p>
                         </div>
                         <div className="flex items-center gap-2">
                           <span className={`px-2 py-1 rounded-full text-sm ${
@@ -1578,6 +1356,8 @@ function AdminDashboard() {
             ))}
           </div>
         </div>
+
+        {renderCompletedRooms()}
       </div>
     </div>
   );
