@@ -27,6 +27,7 @@ interface GameRoom {
   max_players: number;
   status: string;
   players: RoomPlayer[];
+  completion_time?: string;
 }
 
 interface RoomPlayer {
@@ -82,6 +83,7 @@ function Dashboard() {
   const [retryCount, setRetryCount] = useState(0);
   const maxRetries = 3;
   const retryDelay = 2000;
+  const [completedRooms, setCompletedRooms] = useState<GameRoom[]>([]);
 
   const { isSubscribed } = useRealtimeSubscription({
     channelName: 'user_dashboard',
@@ -422,6 +424,7 @@ function Dashboard() {
         return;
       }
 
+      const completedRoomsResult = await loadCompletedRooms();
       await Promise.all([
         loadSessions(),
         loadRooms(),
@@ -429,6 +432,7 @@ function Dashboard() {
         checkForActiveGame()
       ]);
       
+      setCompletedRooms(completedRoomsResult);
       setRetryCount(0);
       setLoading(false);
     } catch (error) {
@@ -812,6 +816,35 @@ function Dashboard() {
     return { name: 'Unknown', email: '' };
   };
 
+  const loadCompletedRooms = async () => {
+    try {
+      console.log('Loading completed game rooms...');
+      const { data: roomsData, error: roomsError } = await supabase
+        .from('game_rooms')
+        .select(`
+          *,
+          players:room_players(
+            id,
+            user_id,
+            status,
+            session_id,
+            completed_at,
+            user:users(name, email)
+          )
+        `)
+        .eq('status', 'completed')
+        .order('completion_time', { ascending: false });
+
+      if (roomsError) throw roomsError;
+
+      console.log('Fetched completed rooms:', roomsData?.length || 0);
+      return roomsData || [];
+    } catch (error) {
+      console.error('Error loading completed rooms:', error);
+      return [];
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center">
@@ -965,6 +998,31 @@ function Dashboard() {
               ))}
               {rooms.length === 0 && (
                 <p className="text-gray-400">No rooms available. Wait for an admin to create one.</p>
+              )}
+            </div>
+          </div>
+  
+          <div className="bg-gray-800 rounded-lg p-6 mb-8">
+            <h2 className="text-xl font-semibold text-white mb-4">Completed Rooms</h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {completedRooms.map((room) => (
+                <div key={room.id} className="bg-gray-700 p-4 rounded-lg">
+                  <div className="flex justify-between items-center mb-3">
+                    <h3 className="text-lg font-semibold">{room.name}</h3>
+                    <div className="flex items-center gap-2">
+                      <Users size={18} className="text-gray-400" />
+                      <span className="text-gray-400">
+                        {room.players.length} players completed
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-sm text-gray-400">
+                    Completed at: {room.completion_time ? new Date(room.completion_time).toLocaleString() : 'Unknown'}
+                  </div>
+                </div>
+              ))}
+              {completedRooms.length === 0 && (
+                <p className="text-gray-400">No completed rooms yet.</p>
               )}
             </div>
           </div>

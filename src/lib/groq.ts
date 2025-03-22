@@ -2,6 +2,34 @@
 const GROQ_API_KEY = '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';
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
+interface TradingAction {
+  action: 'buy' | 'sell' | 'hold';
+  stock_name: string;
+  price: number;
+  quantity: number;
+  timestamp: string;
+}
+
+interface TradingPatterns {
+  repeatedBuys: number;
+  repeatedSells: number;
+  quickTrades: number;
+  sameStockTrades: Record<string, number>;
+  priceAnchoring: Array<{
+    priceDiff: number;
+    action: string;
+  }>;
+  reversalTrades: number;
+  profitableExits: number;
+  lossyExits: number;
+  timeToDecision: number[];
+  confidenceMetrics: {
+    largePositions: number;
+    quickDecisions: number;
+    positionIncreases: number;
+  };
+}
+
 export const generatePersonalityReport = async (actions: any[]) => {
   if (!actions || !Array.isArray(actions)) {
     console.log('Invalid actions data:', actions);
@@ -21,35 +49,30 @@ Playing the game with more active trading will provide insights into your tradin
   try {
     console.log(`Generating report with GROQ API based on ${actions.length} actions`);
     
-    // Count different action types
-    const actionSummary = actions.reduce((acc: any, action: any) => {
-      if (action && action.action) {
-        acc[action.action] = (acc[action.action] || 0) + 1;
-      }
-      return acc;
-    }, {});
-
-    const totalActions = actions.length;
-    const buyCount = actionSummary.buy || 0;
-    const sellCount = actionSummary.sell || 0;
-    const holdCount = actionSummary.hold || 0;
+    // Analyze trading patterns for biases
+    const actionPatterns = analyzeTradingPatterns(actions);
     
     // Prepare data for the API
     const prompt = `
-    Analyze the following trading activity and generate a personality report:
+    Analyze the following trading activity and generate a comprehensive bias analysis report:
     
-    Total Actions: ${totalActions}
-    Buy Orders: ${buyCount}
-    Sell Orders: ${sellCount}
-    Hold Actions: ${holdCount}
+    Trading Patterns:
+    ${JSON.stringify(actionPatterns, null, 2)}
     
-    Please provide a detailed trading psychology analysis including:
-    1. Trading style assessment
-    2. Risk tolerance evaluation
-    3. Behavioral insights
-    4. Recommendations for improvement
+    Please provide a detailed analysis of the following cognitive biases:
+    1. Confirmation Bias: How the trader seeks information that confirms their existing beliefs
+    2. Anchoring and Adjustment Bias: How initial price points influence trading decisions
+    3. Framing Bias: How the presentation of information affects trading choices
+    4. Overconfidence Bias: Signs of excessive confidence in trading decisions
+    5. Hindsight Bias: Tendency to view past events as predictable
     
-    Format the response as a markdown document with sections.
+    For each bias:
+    - Provide specific examples from the trading pattern
+    - Rate the bias strength (Low, Medium, High)
+    - Suggest specific improvements
+    
+    Format the response as a markdown document with clear sections.
+    Keep the analysis professional and constructive.
     `;
     
     // Call the GROQ API
@@ -64,7 +87,7 @@ Playing the game with more active trading will provide insights into your tradin
         messages: [
           {
             role: 'system',
-            content: 'You are a trading psychology expert who analyzes trading patterns and provides insightful feedback.'
+            content: 'You are a trading psychology expert specializing in cognitive bias analysis.'
           },
           {
             role: 'user',
@@ -72,7 +95,7 @@ Playing the game with more active trading will provide insights into your tradin
           }
         ],
         temperature: 0.7,
-        max_tokens: 1000
+        max_tokens: 2000
       })
     });
     
@@ -92,89 +115,189 @@ Playing the game with more active trading will provide insights into your tradin
     return report;
   } catch (error) {
     console.error('Error generating personality report with GROQ:', error);
-    
-    // Fallback to local analysis if API fails
-    return generateLocalAnalysis(actions);
+    return generateLocalBiasAnalysis(actions);
   }
 };
 
-// Fallback function for local analysis if the API fails
-const generateLocalAnalysis = (actions: any[]) => {
+// Helper function to analyze trading patterns
+const analyzeTradingPatterns = (actions: TradingAction[]): TradingPatterns => {
+  const patterns: TradingPatterns = {
+    repeatedBuys: 0,
+    repeatedSells: 0,
+    quickTrades: 0,
+    sameStockTrades: {},
+    priceAnchoring: [],
+    reversalTrades: 0,
+    profitableExits: 0,
+    lossyExits: 0,
+    timeToDecision: [],
+    confidenceMetrics: {
+      largePositions: 0,
+      quickDecisions: 0,
+      positionIncreases: 0
+    }
+  };
+
+  actions.forEach((action, index) => {
+    if (index === 0) return;
+
+    const prevAction = actions[index - 1];
+    const timeDiff = new Date(action.timestamp).getTime() - new Date(prevAction.timestamp).getTime();
+
+    // Track same-stock trading patterns
+    if (action.stock_name) {
+      patterns.sameStockTrades[action.stock_name] = (patterns.sameStockTrades[action.stock_name] || 0) + 1;
+    }
+
+    // Analyze quick decisions (less than 10 seconds)
+    if (timeDiff < 10000) {
+      patterns.quickTrades++;
+    }
+
+    // Track price anchoring (comparing to previous trades)
+    if (action.price && prevAction.price) {
+      patterns.priceAnchoring.push({
+        priceDiff: action.price - prevAction.price,
+        action: action.action
+      });
+    }
+
+    // Analyze position confidence
+    if (action.quantity > 100) {
+      patterns.confidenceMetrics.largePositions++;
+    }
+    if (timeDiff < 5000) {
+      patterns.confidenceMetrics.quickDecisions++;
+    }
+    if (action.action === 'buy' && prevAction.action === 'buy' && action.stock_name === prevAction.stock_name) {
+      patterns.confidenceMetrics.positionIncreases++;
+    }
+
+    // Track trade reversals
+    if (action.action !== prevAction.action) {
+      patterns.reversalTrades++;
+    }
+
+    // Track profitable vs lossy exits
+    if (action.action === 'sell') {
+      if (action.price > prevAction.price) {
+        patterns.profitableExits++;
+      } else {
+        patterns.lossyExits++;
+      }
+    }
+
+    patterns.timeToDecision.push(timeDiff);
+  });
+
+  return patterns;
+};
+
+// Fallback function for local bias analysis
+const generateLocalBiasAnalysis = (actions: any[]) => {
   try {
-    // Normalize the actions to handle potentially invalid data
-    const validActions = actions.filter(action => 
-      action && 
-      typeof action === 'object' && 
-      typeof action.action === 'string' && 
-      ['buy', 'sell', 'hold'].includes(action.action)
-    );
-
-    if (validActions.length === 0) {
-      return 'No valid trading actions found to analyze.';
-    }
+    const patterns = analyzeTradingPatterns(actions);
     
-    // Count different action types
-    const actionSummary = validActions.reduce((acc: any, action: any) => {
-      acc[action.action] = (acc[action.action] || 0) + 1;
-      return acc;
-    }, {});
+    // Calculate bias indicators
+    const confirmationBias = calculateConfirmationBias(patterns);
+    const anchoringBias = calculateAnchoringBias(patterns);
+    const framingBias = calculateFramingBias(patterns);
+    const overconfidenceBias = calculateOverconfidenceBias(patterns);
+    const hindsightBias = calculateHindsightBias(patterns);
 
-    const totalActions = validActions.length;
-    const buyRatio = actionSummary.buy ? actionSummary.buy / totalActions : 0;
-    const sellRatio = actionSummary.sell ? actionSummary.sell / totalActions : 0;
-    const holdRatio = actionSummary.hold ? actionSummary.hold / totalActions : 0;
-
-    // Determine the trading style
-    let tradingStyle = '';
-    if (buyRatio > 0.6) {
-      tradingStyle = 'Aggressive Buyer';
-    } else if (sellRatio > 0.6) {
-      tradingStyle = 'Defensive Seller';
-    } else if (holdRatio > 0.6) {
-      tradingStyle = 'Patient Observer';
-    } else if (buyRatio > sellRatio && buyRatio > holdRatio) {
-      tradingStyle = 'Growth-Oriented Investor';
-    } else if (sellRatio > buyRatio && sellRatio > holdRatio) {
-      tradingStyle = 'Profit-Taking Trader';
-    } else if (holdRatio > buyRatio && holdRatio > sellRatio) {
-      tradingStyle = 'Long-Term Investor';
-    } else {
-      tradingStyle = 'Balanced Trader';
-    }
-
-    // Format the final report with better structure
     return `
-# Trading Psychology Analysis (Local Analysis)
+# Trading Bias Analysis
 
-## Trading Activity Summary
-- Total Actions: ${totalActions}
-- Buy Orders: ${actionSummary.buy || 0} (${Math.round(buyRatio * 100)}%)
-- Sell Orders: ${actionSummary.sell || 0} (${Math.round(sellRatio * 100)}%)
-- Hold Actions: ${actionSummary.hold || 0} (${Math.round(holdRatio * 100)}%)
+## Confirmation Bias
+${confirmationBias}
 
-## Trading Profile
-- Trading Style: ${tradingStyle}
+## Anchoring and Adjustment Bias
+${anchoringBias}
 
-## Behavioral Insights
-${buyRatio > 0.7 ? "- You tend to be very bullish and eager to enter new positions." : ""}
-${sellRatio > 0.7 ? "- You demonstrate a cautious approach, preferring to secure profits." : ""}
-${holdRatio > 0.7 ? "- Your patient approach shows strong conviction in your positions." : ""}
-${Math.abs(buyRatio - sellRatio) < 0.1 ? "- You maintain a well-balanced approach between buying and selling." : ""}
+## Framing Bias
+${framingBias}
 
-Thank you for playing! Your final balance reflects the outcome of your trading decisions.
+## Overconfidence Bias
+${overconfidenceBias}
+
+## Hindsight Bias
+${hindsightBias}
+
+Note: This analysis is based on observed trading patterns and should be used as a general guide for improvement.
 `;
   } catch (error) {
-    console.error('Error in local analysis:', error);
+    console.error('Error in local bias analysis:', error);
     return `
 # Trading Analysis
 
-We encountered technical difficulties generating your detailed trading analysis.
+We encountered technical difficulties analyzing your trading biases.
 
-Summary of your activity:
-- Actions recorded: ${actions.length}
-- Game completed successfully
+Summary:
+- Actions analyzed: ${actions.length}
+- Analysis completed with limited data
 
-Thank you for playing! Your final balance reflects the outcome of your trading decisions.
+Please consult with a trading professional for more detailed bias analysis.
 `;
   }
+};
+
+// Helper functions for bias calculations
+const calculateConfirmationBias = (patterns: TradingPatterns) => {
+  const sameStockFrequency = Object.values(patterns.sameStockTrades)
+    .filter((count: any) => count > 3).length;
+  
+  if (sameStockFrequency > 5) {
+    return "Strong confirmation bias detected. You tend to trade repeatedly in the same stocks, possibly seeking information that confirms your existing beliefs. Consider diversifying your analysis sources and challenging your assumptions more frequently.";
+  } else if (sameStockFrequency > 2) {
+    return "Moderate confirmation bias present. While you show some variety in stock selection, there's a tendency to stick with familiar patterns. Try actively seeking contrary opinions before making trading decisions.";
+  }
+  return "Low confirmation bias. You demonstrate good variety in your trading choices and appear to consider multiple viewpoints.";
+};
+
+const calculateAnchoringBias = (patterns: TradingPatterns) => {
+  const anchoringInstances = patterns.priceAnchoring.filter((p: any) => 
+    Math.abs(p.priceDiff) < 0.5
+  ).length;
+  
+  if (anchoringInstances > patterns.priceAnchoring.length * 0.7) {
+    return "High anchoring bias observed. Your trading decisions appear strongly influenced by initial or previous price points. Practice setting price targets based on multiple factors rather than anchoring to specific price levels.";
+  } else if (anchoringInstances > patterns.priceAnchoring.length * 0.4) {
+    return "Moderate anchoring bias detected. While you show some flexibility in price targets, there's room for improvement in considering wider price ranges.";
+  }
+  return "Low anchoring bias. You demonstrate good flexibility in adapting to different price levels.";
+};
+
+const calculateFramingBias = (patterns: TradingPatterns) => {
+  const quickReversals = patterns.reversalTrades;
+  const totalTrades = patterns.timeToDecision.length;
+  
+  if (quickReversals > totalTrades * 0.4) {
+    return "Strong framing bias indicated. Your trading decisions appear highly influenced by how information is presented, leading to frequent position reversals. Work on developing a more consistent trading framework.";
+  } else if (quickReversals > totalTrades * 0.2) {
+    return "Moderate framing bias present. While you show some consistency, market presentation sometimes leads to reactive decisions.";
+  }
+  return "Low framing bias. You maintain good consistency in your trading approach regardless of market presentation.";
+};
+
+const calculateOverconfidenceBias = (patterns: TradingPatterns) => {
+  const { largePositions, quickDecisions, positionIncreases } = patterns.confidenceMetrics;
+  const overconfidenceScore = (largePositions + quickDecisions + positionIncreases) / 3;
+  
+  if (overconfidenceScore > 5) {
+    return "High overconfidence bias detected. Your trading shows signs of excessive risk-taking and quick decision-making. Consider implementing more rigorous risk management and decision-making processes.";
+  } else if (overconfidenceScore > 2) {
+    return "Moderate overconfidence bias present. While you show some caution, there are instances of overly confident trading decisions.";
+  }
+  return "Low overconfidence bias. You demonstrate good balance between confidence and caution in your trading decisions.";
+};
+
+const calculateHindsightBias = (patterns: TradingPatterns) => {
+  const profitRatio = patterns.profitableExits / (patterns.profitableExits + patterns.lossyExits);
+  
+  if (profitRatio > 0.7) {
+    return "Potential high hindsight bias. Your high success rate might lead to overestimating the predictability of past trades. Remember that past success doesn't guarantee future results.";
+  } else if (profitRatio > 0.5) {
+    return "Moderate hindsight bias possible. While you have a good success rate, maintain awareness that market movements are not always predictable.";
+  }
+  return "Low hindsight bias indicated. Your trading patterns suggest a realistic view of market unpredictability.";
 };

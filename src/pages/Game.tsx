@@ -2,7 +2,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useGameStore } from '../store/gameStore';
 import { generatePersonalityReport } from '../lib/groq';
-import { TrendingUp, TrendingDown, Minus, RotateCcw, Timer, DollarSign, AlertTriangle } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, RotateCcw, Timer, DollarSign, AlertTriangle, LogOut } from 'lucide-react';
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { LineChart, Line, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -35,7 +35,6 @@ function Game() {
   const location = useLocation();
   const [timeLeft, setTimeLeft] = useState(60);
   const [loading, setLoading] = useState(true);
-  const [actionsCount, setActionsCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -83,6 +82,10 @@ function Game() {
   } = useGameStore();
 
   const [stockQuantities, setStockQuantities] = useState<{[key: string]: number}>({});
+  const [insufficientFunds, setInsufficientFunds] = useState<{[key: string]: boolean}>({});
+
+  const [activeGameSession, setActiveGameSession] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const setLoadingWithDebounce = useCallback((isLoading: boolean) => {
     if (loadingTimeout.current) {
@@ -145,7 +148,6 @@ function Game() {
     setLevelAdvanceLock(true);
     lastLevelAdvanceTime.current = now;
     
-    setActionsCount(0);
     setTimeLeft(60);
     
     console.log(`Advancing to next level: ${currentLevel + 1} (will display as Level ${currentLevel + 2})`);
@@ -435,16 +437,18 @@ function Game() {
     };
   }, [gameCompleted, autoUpdateEnabled, updateStocks, handleNextLevel, levelAdvanceLock, loading, currentLevel]);
 
-  const [canAdvance, setCanAdvance] = useState(false);
-  
-  useEffect(() => {
-    if (actionsCount === 3 && !gameCompleted && !levelAdvanceLock && currentLevel < 9) {
-      console.log(`All 3 actions completed on level ${currentLevel}, player can advance to next level`);
-      setCanAdvance(true);
-    } else {
-      setCanAdvance(false);
-    }
-  }, [actionsCount, gameCompleted, currentLevel, levelAdvanceLock]);
+  const validateStockQuantity = (stockName: string, quantity: number) => {
+    const stock = gameStocks.find(s => s.name === stockName);
+    if (!stock) return;
+    
+    const totalCost = stock.price * quantity;
+    const isInsufficient = totalCost > balance;
+    
+    setInsufficientFunds(prev => ({
+      ...prev,
+      [stockName]: isInsufficient
+    }));
+  };
 
   const handleAction = async (stockName: string, action: string, price: number) => {
     if (isPaused || gameCompleted || levelAdvanceLock) return;
@@ -513,8 +517,6 @@ function Game() {
           console.error('Error updating session balance:', sessionError);
         }
       }
-
-      setActionsCount(prev => Math.min(prev + 1, 3));
       
     } catch (error) {
       console.error('Error handling action:', error);
@@ -546,6 +548,10 @@ function Game() {
       setShowCompletionScreen(true);
       return;
     }
+
+    // Store the final balance before completing the game
+    const finalBalance = balance;
+    localStorage.setItem('final_game_balance', finalBalance.toString());
 
     const forceCompletionTimeout = setTimeout(() => {
       console.log('Force completion screen after delay');
@@ -612,7 +618,7 @@ function Game() {
 
       console.log('Game completion state:', {
         currentLevel,
-        balance,
+        balance: finalBalance,
         sessionId,
         roomId,
         roomPlayerId,
@@ -627,7 +633,7 @@ function Game() {
           const { error: sessionUpdateError } = await supabase
             .from('game_sessions')
             .update({
-              final_balance: balance,
+              final_balance: finalBalance,
               personality_report: report,
               completed_at: new Date().toISOString()
             })
@@ -645,20 +651,33 @@ function Game() {
         
         if (roomPlayerId) {
           try {
-            console.log(`Updating room player status (${roomPlayerId}) to completed`);
+            console.log(`Marking player ${roomPlayerId} as completed`);
+            // Use the mark_player_completed function
             const { error: playerError } = await supabase
-              .from('room_players')
-              .update({ 
-                status: 'completed',
-                completed_at: new Date().toISOString()
-              })
-              .eq('id', roomPlayerId);
+              .rpc('mark_player_completed', { player_id: roomPlayerId });
               
             if (playerError) {
-              console.error('Error updating player status:', playerError);
+              console.error('Error marking player as completed:', playerError);
               throw playerError;
             }
-            console.log('Player status updated successfully');
+            console.log('Player marked as completed');
+
+            // Check room completion status
+            if (roomId) {
+              const { data: roomStatus, error: statusError } = await supabase
+                .rpc('get_room_completion_status', { room_id: roomId });
+                
+              if (statusError) {
+                console.error('Error checking room completion status:', statusError);
+              } else if (roomStatus && roomStatus.length > 0) {
+                const status = roomStatus[0];
+                console.log('Room status:', status);
+                console.log(`${status.completed_players} out of ${status.total_players} players completed`);
+                
+                // The check_room_completion trigger will automatically update the room status
+                // if all players have completed
+              }
+            }
           } catch (playerUpdateError) {
             console.error('Failed to update player status:', playerUpdateError);
           }
@@ -673,7 +692,7 @@ function Game() {
                 room_id: roomId,
                 session_id: sessionId,
                 user_id: session.user.id,
-                final_balance: balance,
+                final_balance: finalBalance,
                 created_at: new Date().toISOString()
               }
             ])
@@ -687,77 +706,6 @@ function Game() {
         } catch (error) {
           console.error('Failed to add game result:', error);
           throw new Error(`Failed to save game result: ${error instanceof Error ? error.message : 'Unknown error'}`);
-        }
-        
-        if (roomId) {
-          try {
-            console.log(`Checking if all players in room ${roomId} have completed`);
-            const { data: playersData, error: playersError } = await supabase
-              .from('room_players')
-              .select('status')
-              .eq('room_id', roomId)
-              .eq('status', 'in_game');
-              
-            if (playersError) {
-              console.error('Error checking remaining players:', playersError);
-              throw playersError;
-            }
-
-            console.log(`Found ${playersData?.length || 0} players still in game`);
-            
-            if (!playersData || playersData.length === 0 || currentLevel >= 9) {
-              console.log('All players completed or final level reached, updating room status');
-              const { error: roomError } = await supabase
-                .from('game_rooms')
-                .update({ 
-                  status: 'completed',
-                  ended_at: new Date().toISOString()
-                })
-                .eq('id', roomId);
-                
-              if (roomError) {
-                console.error('Error updating room status:', roomError);
-                throw roomError;
-              }
-              console.log('Room status updated to completed');
-
-              try {
-                console.log('Calculating final rankings');
-                const { data: results, error: ranksError } = await supabase
-                  .from('game_results')
-                  .select('id, final_balance, user_id')
-                  .eq('room_id', roomId)
-                  .order('final_balance', { ascending: false });
-
-                if (ranksError) {
-                  console.error('Error fetching results for ranking:', ranksError);
-                  throw ranksError;
-                }
-
-                if (results && results.length > 0) {
-                  console.log(`Updating ranks for ${results.length} players`);
-                  for (let i = 0; i < results.length; i++) {
-                    const { error: updateRankError } = await supabase
-                      .from('game_results')
-                      .update({ 
-                        rank: i + 1,
-                        updated_at: new Date().toISOString()
-                      })
-                      .eq('id', results[i].id);
-
-                    if (updateRankError) {
-                      console.error(`Error updating rank for result ${results[i].id}:`, updateRankError);
-                    }
-                  }
-                  console.log('All player ranks updated successfully');
-                }
-              } catch (rankingError) {
-                console.error('Error updating rankings:', rankingError);
-              }
-            }
-          } catch (roomUpdateError) {
-            console.error('Error updating room status:', roomUpdateError);
-          }
         }
         
         if (roomId) {
@@ -824,7 +772,7 @@ function Game() {
             .insert([
               {
                 user_id: session.user.id,
-                final_balance: balance,
+                final_balance: finalBalance,
                 personality_report: report,
                 completed_at: new Date().toISOString()
               }
@@ -920,6 +868,10 @@ function Game() {
   const handleCompleteGame = useCallback(() => {
     console.log('Complete Game button clicked, completing game');
     
+    // Store the final balance before completing the game
+    const finalBalance = balance;
+    localStorage.setItem('final_game_balance', finalBalance.toString());
+    
     setGameCompleted(true);
     setShowCompletionScreen(true);
     
@@ -952,12 +904,7 @@ function Game() {
           
           if (roomPlayerId) {
             const { error: playerError } = await supabase
-              .from('room_players')
-              .update({ 
-                status: 'completed',
-                completed_at: new Date().toISOString()
-              })
-              .eq('id', roomPlayerId);
+              .rpc('mark_player_completed', { player_id: roomPlayerId });
               
             if (playerError) {
               console.error('Error updating player status:', playerError);
@@ -977,7 +924,7 @@ function Game() {
                     room_id: roomId,
                     session_id: sessionId,
                     user_id: session.user.id,
-                    final_balance: balance,
+                    final_balance: finalBalance,
                     created_at: new Date().toISOString()
                   }
                 ]);
@@ -1015,6 +962,19 @@ function Game() {
 
   const shouldShowCompletionScreen = showCompletionScreen || 
     (gameCompleted && sessionId && localStorage.getItem(`game_completed_${sessionId}`) === 'true');
+
+  // Add effect to restore final balance when showing completion screen
+  useEffect(() => {
+    if (shouldShowCompletionScreen) {
+      const storedBalance = localStorage.getItem('final_game_balance');
+      if (storedBalance) {
+        const finalBalance = parseFloat(storedBalance);
+        if (!isNaN(finalBalance)) {
+          updateBalance(finalBalance - balance);
+        }
+      }
+    }
+  }, [shouldShowCompletionScreen, balance, updateBalance]);
 
   useEffect(() => {
     let timer: NodeJS.Timeout | null = null;
@@ -1063,6 +1023,112 @@ function Game() {
       window.removeEventListener('stock-price-updated', (e: any) => handleStockUpdate(e.detail));
     };
   }, [fetchInitialData, setupRealtimeSubscriptions, cleanupRealtimeSubscriptions]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate('/');
+  };
+
+  const handleReturnToDashboard = async () => {
+    try {
+      console.log('Return to Dashboard clicked');
+      
+      if (roomPlayerId) {
+        console.log(`Step 1: Marking player ${roomPlayerId} as completed`);
+        
+        // First manually update the player status directly in the database
+        const { error: directUpdateError } = await supabase
+          .from('room_players')
+          .update({ 
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+            completion_status: 'completed'
+          })
+          .eq('id', roomPlayerId);
+          
+        if (directUpdateError) {
+          console.error('Error directly updating player status:', directUpdateError);
+        } else {
+          console.log('SUCCESS: Player directly marked as completed in database');
+        }
+        
+        // Wait for a moment to ensure database consistency
+        console.log('Step 2: Waiting for database to process updates...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        if (roomId) {
+          console.log(`Step 3: Force checking room ${roomId} completion status`);
+          
+          // Use our new force check function
+          try {
+            const { data: forceCheckResult, error: forceCheckError } = await supabase
+              .rpc('force_check_room_completion', { room_id_param: roomId });
+            
+            if (forceCheckError) {
+              console.error('Error force checking room completion:', forceCheckError);
+              
+              // Fallback to direct update
+              console.log('Step 3b: Fallback - Direct room update');
+              
+              // Get player counts
+              const { data: playerCounts, error: countsError } = await supabase
+                .from('room_players')
+                .select('id, status')
+                .eq('room_id', roomId)
+                .neq('status', 'left');
+                
+              if (countsError) {
+                console.error('Error getting player counts:', countsError);
+              } else if (playerCounts) {
+                const totalPlayers = playerCounts.length;
+                const completedPlayers = playerCounts.filter(p => p.status === 'completed').length;
+                
+                console.log(`DIRECT COUNT: ${completedPlayers} out of ${totalPlayers} players completed`);
+                console.log('Player details:', JSON.stringify(playerCounts));
+                
+                // If all players are now completed, mark the room as completed
+                if (totalPlayers > 0 && completedPlayers === totalPlayers) {
+                  console.log('All players completed, directly updating room status');
+                  
+                  const { error: roomUpdateError } = await supabase
+                    .from('game_rooms')
+                    .update({
+                      status: 'completed',
+                      all_players_completed: true,
+                      completion_time: new Date().toISOString(),
+                      ended_at: new Date().toISOString()
+                    })
+                    .eq('id', roomId);
+                    
+                  if (roomUpdateError) {
+                    console.error('Error updating room status:', roomUpdateError);
+                  } else {
+                    console.log('SUCCESS: Room marked as completed directly');
+                  }
+                } else {
+                  console.log(`Not all players completed yet: ${completedPlayers}/${totalPlayers}`);
+                }
+              }
+            } else {
+              console.log(`Force check result: ${forceCheckResult ? 'Room updated' : 'No update needed'}`);
+            }
+          } catch (forceError) {
+            console.error('Exception in force check:', forceError);
+          }
+        }
+      }
+      
+      // Give ample time for all operations to complete
+      console.log('Step 4: Waiting before navigation...');
+      setTimeout(() => {
+        console.log('Step 5: Navigating to dashboard');
+        navigate('/dashboard');
+      }, 1500);
+    } catch (error) {
+      console.error('Error returning to dashboard:', error);
+      navigate('/dashboard');
+    }
+  };
 
   if (shouldShowCompletionScreen) {
     return (
@@ -1116,21 +1182,17 @@ function Game() {
 
           <div className="flex flex-col md:flex-row gap-4 justify-center">
             <button
-              onClick={() => navigate('/dashboard')}
+              onClick={handleReturnToDashboard}
               className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg transition-colors"
             >
               Return to Dashboard
             </button>
           </div>
 
-          {error === personalityReport && (
-            <div className="mt-8 bg-gray-700 p-6 rounded-lg">
-              <h3 className="text-xl font-semibold mb-4">Trading Analysis</h3>
-              <div className="text-gray-300 whitespace-pre-wrap">
-                {personalityReport}
-              </div>
-            </div>
-          )}
+          <div className="mt-8 text-center text-gray-400">
+            <p>Your trading analysis report will be available to game administrators.</p>
+            <p className="text-sm mt-2">This helps maintain fair competition and prevents gaming of the system.</p>
+          </div>
         </div>
       </div>
     );
@@ -1150,6 +1212,45 @@ function Game() {
   return (
     <div className="min-h-screen bg-gray-900 p-8">
       <div className="max-w-7xl mx-auto">
+        <div className="flex justify-between items-start mb-8">
+          <div className="flex items-center gap-4">
+            <TrendingUp className="text-green-500" size={32} />
+            <h1 className="text-3xl font-bold text-white">Trading History</h1>
+          </div>
+
+          <div className="flex flex-col gap-4 min-w-[300px]">
+            {isAdmin && (
+              <button
+                onClick={() => navigate('/admin')}
+                className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg transition-colors"
+              >
+                Admin Dashboard
+              </button>
+            )}
+            <button
+              onClick={() => navigate('/game')}
+              className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg transition-colors"
+            >
+              New Game
+            </button>
+            {activeGameSession && (
+              <button
+                onClick={() => navigate('/game', { state: { sessionId: activeGameSession } })}
+                className="bg-yellow-600 hover:bg-yellow-700 text-white px-6 py-2 rounded-lg transition-colors"
+              >
+                Resume Active Game
+              </button>
+            )}
+            <button
+              onClick={handleLogout}
+              className="flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded-lg transition-colors"
+            >
+              <LogOut size={20} />
+              Logout
+            </button>
+          </div>
+        </div>
+
         <div className="flex justify-between items-start mb-8">
           <div>
             <h1 className="text-3xl font-bold text-white">Level {displayLevel}</h1>
@@ -1210,7 +1311,6 @@ function Game() {
               <button
                 onClick={() => {
                   resetGame();
-                  setActionsCount(0);
                 }}
                 className="flex items-center gap-2 bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg text-white"
                 disabled={gameCompleted}
@@ -1237,21 +1337,10 @@ function Game() {
         <div className="bg-gray-800 p-6 rounded-lg mb-8">
           <h2 className="text-xl font-semibold text-white mb-4">Market News</h2>
           <p className="text-gray-300 text-lg">{news[currentLevel]}</p>
-          <p className="text-gray-400 mt-2">Actions remaining: {3 - actionsCount}</p>
-          {canAdvance && (
-            <div className="mt-4 bg-green-700 text-white p-3 rounded-lg">
-              <p className="font-semibold">You've completed all actions for this level!</p>
-              <p>Click the "Advance to Level {displayLevel + 1}" button below when you're ready to continue.</p>
-            </div>
-          )}
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
           {gameStocks.map((stock) => {
-            const hasActed = gameActions.some(
-              action => action.level === currentLevel && action.stock_name === stock.name
-            );
-            
             const wasRecentlyUpdated = recentUpdates[stock.name];
 
             return (
@@ -1362,19 +1451,26 @@ function Game() {
                           ...prev,
                           [stock.name]: newQuantity
                         }));
+                        validateStockQuantity(stock.name, newQuantity);
                       }}
                       className="w-20 px-2 py-1 rounded bg-gray-600 text-white text-sm"
-                      disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
+                      disabled={loading || gameCompleted || isPaused}
                     />
                   </div>
                 </div>
 
+                {insufficientFunds[stock.name] && (
+                  <div className="text-red-500 text-sm mt-1">
+                    Insufficient funds for {stockQuantities[stock.name] || 1} shares
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 gap-2">
                   <button
                     onClick={() => handleAction(stock.name, 'buy', stock.price)}
-                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused}
+                    disabled={loading || gameCompleted || isPaused || insufficientFunds[stock.name]}
                     className={`py-2 rounded-lg font-medium ${
-                      hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused
+                      loading || gameCompleted || isPaused || insufficientFunds[stock.name]
                         ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                         : 'bg-green-600 hover:bg-green-700 text-white'
                     }`}
@@ -1383,9 +1479,9 @@ function Game() {
                   </button>
                   <button
                     onClick={() => handleAction(stock.name, 'sell', stock.price)}
-                    disabled={hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused || getStockQuantity(stock.name) < (stockQuantities[stock.name] || 1)}
+                    disabled={loading || gameCompleted || isPaused || getStockQuantity(stock.name) < (stockQuantities[stock.name] || 1)}
                     className={`py-2 rounded-lg font-medium ${
-                      hasActed || actionsCount >= 3 || loading || gameCompleted || isPaused || getStockQuantity(stock.name) < (stockQuantities[stock.name] || 1)
+                      loading || gameCompleted || isPaused || getStockQuantity(stock.name) < (stockQuantities[stock.name] || 1)
                         ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                         : 'bg-red-600 hover:bg-red-700 text-white'
                     }`}
@@ -1405,15 +1501,12 @@ function Game() {
             className={`px-8 py-3 rounded-lg text-lg font-semibold ${
               loading || gameCompleted || levelAdvanceLock || isPaused
                 ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
-                : canAdvance
-                  ? 'bg-green-600 hover:bg-green-700 text-white animate-pulse'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white'
+                : 'bg-blue-600 hover:bg-blue-700 text-white'
             }`}
           >
             {loading ? 'Saving...' : 
              gameCompleted ? 'Finish Game' : 
              currentLevel >= 9 ? 'Complete Game' : 
-             canAdvance ? `Advance to Level ${displayLevel + 1}` :
              `Skip to Level ${displayLevel + 1}`}
           </button>
         </div>

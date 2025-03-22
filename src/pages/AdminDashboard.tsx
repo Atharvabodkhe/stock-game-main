@@ -112,97 +112,41 @@ function AdminDashboard() {
       console.log('Realtime update received:', message);
       
       try {
-        // Extract data from the payload
         const { table, payload } = message;
-        
-        // Support both payload formats for backward compatibility
         const eventType = payload.eventType || (payload.type as string);
         const newRecord = payload.new || payload.record;
         const oldRecord = payload.old || payload.old_record;
         
         console.log(`Received ${eventType} event for ${table}:`, { newRecord, oldRecord });
         
-        // Only process data if there's an actual update
         if (!newRecord && !oldRecord) {
           console.log('Received event without data payload, ignoring');
           return;
         }
         
-        // Implement optimistic UI updates for immediate feedback
         if (table === 'game_rooms') {
-          // Direct state manipulation based on event type
-          if (eventType === 'INSERT' && newRecord) {
-            // For new room, immediately add to state without refetching
-            console.log('Optimistically adding new room to UI');
-            setRooms(prevRooms => {
-              // Check if this room already exists to avoid duplicates
-              if (prevRooms.some(room => room.id === newRecord.id)) {
-                return prevRooms;
-              }
-              
-              // Add the new room with an empty players array
-              return [{ ...newRecord, players: [] } as GameRoom, ...prevRooms];
-            });
+          if (eventType === 'UPDATE' && newRecord) {
+            console.log('Room update detected:', newRecord);
             
-            // Then fetch just the players for this room
-            const { data: playersData, error: playersError } = await supabase
-              .from('room_players')
-              .select(`
-                id,
-                user_id,
-                status,
-                session_id,
-                user:users(name, email)
-              `)
-              .eq('room_id', newRecord.id);
+            // If the room status changed to completed
+            if (newRecord.status === 'completed') {
+              console.log('Room marked as completed, updating lists');
+              // Refresh both active and completed rooms
+              loadRoomsFast();
+              loadCompletedRooms();
               
-            // Update the room with players once available
-            if (playersData) {
-              // Convert incoming data to safe RoomPlayer format
-              const safePlayersData: RoomPlayer[] = (playersData || []).map(player => {
-                // Use the helper function to safely extract user info
-                const userInfo = safeUserExtract(player.user);
-                
-                // Ensure each player has the correct properties and shape
-                return {
-                  id: player.id || '',
-                  user_id: player.user_id || '',
-                  status: player.status || '',
-                  session_id: player.session_id,
-                  user: userInfo
-                };
-              });
-              
-              // Now update the rooms state with properly typed data
-              setRooms(prevRooms => {
-                return prevRooms.map(room => 
-                  room.id === newRecord.id 
-                    ? { ...room, players: safePlayersData }
-                    : room
-                );
-              });
+              // If this is the selected room, reload its results
+              if (selectedRoom === newRecord.id) {
+                loadResults(newRecord.id);
+              }
+            } else {
+              // For other updates, just refresh the rooms list
+              loadRoomsFast();
             }
-          } 
-          else if (eventType === 'UPDATE' && newRecord) {
-            // For updated room, immediately update in state
-            console.log('Optimistically updating room in UI');
-            setRooms(prevRooms => 
-              prevRooms.map(room => 
-                room.id === newRecord.id 
-                  ? { ...room, ...newRecord, players: room.players } as GameRoom
-                  : room
-              )
-            );
           }
-          else if (eventType === 'DELETE' && oldRecord) {
-            // For deleted room, immediately remove from state
-            console.log('Optimistically removing room from UI');
-            setRooms(prevRooms => 
-              prevRooms.filter(room => room.id !== oldRecord.id)
-            );
-          }
-        } 
-        else if (table === 'room_players') {
+        }
+        
+        if (table === 'room_players') {
           if ((eventType === 'INSERT' || eventType === 'UPDATE') && newRecord) {
             // For player changes, update the specific player in the specific room
             console.log('Optimistically updating player in room');
@@ -285,10 +229,9 @@ function AdminDashboard() {
         }
       } catch (error) {
         console.error('Error handling realtime update:', error);
-        
-        // Try recovery silently in the background
         setTimeout(() => {
           loadRoomsFast();
+          loadCompletedRooms();
         }, 1000);
       }
     },
@@ -818,9 +761,10 @@ function AdminDashboard() {
     return { name: 'Unknown', email: '' };
   };
 
-  // Add a function to load completed rooms
+  // Enhance loadCompletedRooms to include more details
   const loadCompletedRooms = async () => {
     try {
+      console.log('Loading completed rooms...');
       const { data, error } = await supabase
         .from('game_rooms')
         .select(`
@@ -830,6 +774,12 @@ function AdminDashboard() {
             user_id,
             status,
             session_id,
+            completed_at,
+            user:users(name, email)
+          ),
+          game_results(
+            id,
+            final_balance,
             user:users(name, email)
           )
         `)
@@ -837,37 +787,26 @@ function AdminDashboard() {
         .order('ended_at', { ascending: false });
 
       if (error) throw error;
-      setCompletedRooms(data || []);
+      
+      if (data) {
+        console.log(`Found ${data.length} completed rooms`);
+        setCompletedRooms(data);
+      }
     } catch (error) {
       console.error('Error loading completed rooms:', error);
     }
   };
 
-  // Add real-time subscription for completed rooms
+  // Add an effect to refresh completed rooms periodically as backup
   useEffect(() => {
-    loadCompletedRooms();
-
-    const completedRoomsSubscription = supabase
-      .channel('completed_rooms_changes')
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'game_rooms',
-          filter: 'status=eq.completed'
-        },
-        (payload) => {
-          console.log('Completed room change received:', payload);
-          loadCompletedRooms();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      completedRoomsSubscription.unsubscribe();
-    };
-  }, []);
+    const completedRoomsInterval = setInterval(() => {
+      if (isAdmin) {
+        loadCompletedRooms();
+      }
+    }, 5000); // Check every 5 seconds
+    
+    return () => clearInterval(completedRoomsInterval);
+  }, [isAdmin]);
 
   // Modify the results section to only show for admins
   const renderResults = () => {
@@ -931,7 +870,7 @@ function AdminDashboard() {
           {completedRooms.map((room) => (
             <div key={room.id} className="bg-gray-800 rounded-lg p-4">
               <h3 className="text-lg font-semibold mb-2">{room.name}</h3>
-              <p className="text-gray-400 mb-2">Completed at: {new Date(room.ended_at).toLocaleString()}</p>
+              <p className="text-gray-400 mb-2">Completed at: {room.ended_at ? new Date(room.ended_at).toLocaleString() : 'Unknown'}</p>
               <button
                 onClick={() => {
                   setSelectedRoom(room.id);
@@ -1160,20 +1099,6 @@ function AdminDashboard() {
         <div className="bg-gray-800 p-6 rounded-lg mb-8">
           <div className="flex justify-between items-center mb-6">
             <h2 className="text-2xl font-semibold text-white">Game Rooms</h2>
-            <div className="flex gap-4">
-              <button
-                onClick={() => setShowCreateRoom(!showCreateRoom)}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-              >
-                {showCreateRoom ? 'Cancel' : 'Create Room'}
-              </button>
-              <button
-                onClick={loadCompletedRooms}
-                className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors"
-              >
-                {showCompletedRooms ? 'Hide Completed' : 'Show Completed Rooms'}
-              </button>
-            </div>
           </div>
 
           <div className="flex gap-4 mb-6">
