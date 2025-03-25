@@ -651,8 +651,25 @@ function Game() {
         
         if (roomPlayerId) {
           try {
-            console.log(`Marking player ${roomPlayerId} as completed`);
-            // Use the mark_player_completed function
+            console.log(`Marking player ${roomPlayerId} as completed - GAME COMPLETION FLOW`);
+            
+            // CRITICAL: First update player status directly in the database
+            const { error: directUpdateError } = await supabase
+              .from('room_players')
+              .update({ 
+                status: 'completed',
+                completed_at: new Date().toISOString(),
+                completion_status: 'completed'
+              })
+              .eq('id', roomPlayerId);
+              
+            if (directUpdateError) {
+              console.error('Error directly updating player status:', directUpdateError);
+            } else {
+              console.log('Player directly marked as completed in database');
+            }
+            
+            // Then also call the function as a backup
             const { error: playerError } = await supabase
               .rpc('mark_player_completed', { player_id: roomPlayerId });
               
@@ -660,23 +677,241 @@ function Game() {
               console.error('Error marking player as completed:', playerError);
               throw playerError;
             }
-            console.log('Player marked as completed');
+            console.log('Player marked as completed via RPC function');
 
-            // Check room completion status
-            if (roomId) {
-              const { data: roomStatus, error: statusError } = await supabase
-                .rpc('get_room_completion_status', { room_id: roomId });
+            // CRITICAL NEW STEP: Wait longer to ensure database consistency
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // ADDITIONAL VERIFICATION: Double-check the player's status to make sure it was updated
+            try {
+              // Check if our player status was really updated
+              const { data: playerStatus } = await supabase
+                .from('room_players')
+                .select('status, completed_at')
+                .eq('id', roomPlayerId)
+                .single();
                 
-              if (statusError) {
-                console.error('Error checking room completion status:', statusError);
-              } else if (roomStatus && roomStatus.length > 0) {
-                const status = roomStatus[0];
-                console.log('Room status:', status);
-                console.log(`${status.completed_players} out of ${status.total_players} players completed`);
-                
-                // The check_room_completion trigger will automatically update the room status
-                // if all players have completed
+              if (playerStatus && playerStatus.status !== 'completed') {
+                console.log('CRITICAL: Player status still not marked as completed after update. Forcing another update.');
+                await supabase
+                  .from('room_players')
+                  .update({
+                    status: 'completed',
+                    completed_at: new Date().toISOString(),
+                    completion_status: 'completed'
+                  })
+                  .eq('id', roomPlayerId);
+              } else {
+                console.log('Verified player status is properly set to completed:', playerStatus);
               }
+              
+              // Always update the game_sessions to make sure it's marked as completed
+              if (sessionId) {
+                await supabase
+                  .from('game_sessions')
+                  .update({
+                    completed_at: new Date().toISOString()
+                  })
+                  .eq('id', sessionId);
+                console.log('Ensured game session is marked as completed');
+              }
+            } catch (verifyError) {
+              console.error('Error verifying player status:', verifyError);
+            }
+            
+            // Check room completion status and force update if needed
+        if (roomId) {
+              console.log(`Force checking room ${roomId} completion status - GAME COMPLETION FLOW`);
+              
+              // First check if this is the last player to complete
+          try {
+                const { data: playerCounts, error: countsError } = await supabase
+              .from('room_players')
+                  .select('id, status, completion_status, completed_at')
+              .eq('room_id', roomId)
+                  .neq('status', 'left');
+                  
+                if (countsError) {
+                  console.error('Error getting player counts:', countsError);
+                } else if (playerCounts) {
+                  const totalPlayers = playerCounts.length;
+                  const completedPlayers = playerCounts.filter(p => p.status === 'completed').length;
+                  
+                  console.log(`GAME COMPLETION: ${completedPlayers} out of ${totalPlayers} players completed`);
+                  console.log('Player details:', JSON.stringify(playerCounts));
+                  
+                  // If all players are now completed, we're the last one and should force the update
+                  if (totalPlayers > 0 && completedPlayers === totalPlayers) {
+                    console.log('We appear to be the last player! Using multiple strategies to ensure room completion.');
+                    
+                    // Try multiple approaches to ensure the room gets marked as completed
+                    
+                    // 1. Try using the force_check_room_completion function
+                    try {
+                      console.log('Strategy 1: Using force_check_room_completion function');
+                      const { data: forceCheckResult, error: forceCheckError } = await supabase
+                        .rpc('force_check_room_completion', { room_id_param: roomId });
+                        
+                      if (forceCheckError) {
+                        console.error('Error force checking room completion:', forceCheckError);
+                      } else {
+                        console.log(`Force check result: ${forceCheckResult ? 'Room updated' : 'No update needed'}`);
+                      }
+                    } catch (forceError) {
+                      console.error('Exception in force check:', forceError);
+                    }
+                    
+                    // Wait briefly before second attempt
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    // 2. Directly update the room as a failsafe
+                    try {
+                      console.log('Strategy 2: Direct database update of room status');
+                      const { error: roomUpdateError } = await supabase
+                .from('game_rooms')
+                .update({ 
+                  status: 'completed',
+                          all_players_completed: true,
+                          completion_time: new Date().toISOString(),
+                  ended_at: new Date().toISOString()
+                })
+                .eq('id', roomId);
+                
+                      if (roomUpdateError) {
+                        console.error('Error updating room status:', roomUpdateError);
+                      } else {
+                        console.log('SUCCESS: Room directly marked as completed');
+                      }
+                    } catch (directUpdateError) {
+                      console.error('Exception in direct room update:', directUpdateError);
+                    }
+                    
+                    // 3. Verify the room status after our updates
+                    try {
+                      await new Promise(resolve => setTimeout(resolve, 500));
+                      console.log('Verifying room status after updates...');
+                      const { data: roomData } = await supabase
+                        .from('game_rooms')
+                        .select('status, all_players_completed')
+                        .eq('id', roomId)
+                        .single();
+                        
+                      console.log('Final room status:', roomData);
+                      
+                      // If room is still not completed, try one last desperate update
+                      if (roomData && roomData.status !== 'completed') {
+                        console.log('CRITICAL: Room still not marked as completed, trying one final update');
+                        await supabase
+                          .from('game_rooms')
+                          .update({
+                            status: 'completed',
+                            all_players_completed: true,
+                            completion_time: new Date().toISOString(),
+                            ended_at: new Date().toISOString()
+                          })
+                          .eq('id', roomId);
+                      }
+                      
+                      // Also double-check our own player status to make sure it's properly saved
+                      const { data: playerStatus } = await supabase
+                        .from('room_players')
+                        .select('status, completed_at')
+                        .eq('id', roomPlayerId)
+                        .single();
+                        
+                      if (playerStatus && playerStatus.status !== 'completed') {
+                        console.log('CRITICAL: Our player status is still not completed, forcing update');
+                        await supabase
+                          .from('room_players')
+                          .update({
+                            status: 'completed',
+                            completed_at: new Date().toISOString(),
+                            completion_status: 'completed'
+                          })
+                          .eq('id', roomPlayerId);
+                          
+                        await supabase.rpc('mark_player_completed', { player_id: roomPlayerId });
+                      }
+                      
+                      // Also ensure our session is properly marked as completed
+                      await supabase
+                        .from('game_sessions')
+                        .update({
+                          completed_at: new Date().toISOString()
+                        })
+                        .eq('id', sessionId);
+                        
+                    } catch (verifyError) {
+                      console.error('Error verifying room status:', verifyError);
+                    }
+                  } else {
+                    console.log('Not all players have completed yet, will let other players trigger room completion');
+                  }
+                }
+              } catch (forceError) {
+                console.error('Exception in completion check flow:', forceError);
+              }
+            }
+            
+            // FINAL SAFETY CHECK: If we're the last player, make sure all other players are properly marked
+            try {
+              // Get total count of players
+              const { data: playerCount, error: countError } = await supabase
+                .from('room_players')
+                .select('id, status')
+                  .eq('room_id', roomId)
+                .neq('status', 'left');
+                
+              if (!countError && playerCount) {
+                const totalPlayers = playerCount.length;
+                const inGamePlayers = playerCount.filter(p => p.status === 'in_game').length;
+                const completedPlayers = playerCount.filter(p => p.status === 'completed').length;
+                
+                // If all players except possibly 1 are completed, and we have more than 1 player total
+                if (totalPlayers > 1 && completedPlayers >= totalPlayers - 1) {
+                  console.log('FINAL CHECK: Almost all players completed, ensuring room and all players are marked properly');
+                  
+                  // Force mark any stragglers as completed
+                  if (inGamePlayers > 0) {
+                    await supabase
+                      .from('room_players')
+                      .update({
+                        status: 'completed',
+                        completed_at: new Date().toISOString(),
+                        completion_status: 'completed'
+                      })
+                      .eq('room_id', roomId)
+                      .eq('status', 'in_game');
+                      
+                    console.log('Marked all remaining in_game players as completed');
+                  }
+                  
+                  // Force the room to be completed
+                  await supabase
+                    .from('game_rooms')
+                      .update({ 
+                      status: 'completed',
+                      all_players_completed: true,
+                      completion_time: new Date().toISOString(),
+                      ended_at: new Date().toISOString()
+                    })
+                    .eq('id', roomId);
+                    
+                  console.log('Ensured room is marked as completed');
+                  
+                  // Update all associated game sessions
+                  await supabase
+                    .from('game_sessions')
+                    .update({
+                      completed_at: new Date().toISOString()
+                    })
+                    .eq('room_id', roomId);
+                    
+                  console.log('Ensured all game sessions for this room are marked as completed');
+                }
+              }
+            } catch (finalCheckError) {
+              console.error('Error in final safety check:', finalCheckError);
             }
           } catch (playerUpdateError) {
             console.error('Failed to update player status:', playerUpdateError);
@@ -882,37 +1117,156 @@ function Game() {
     if (roomId) {
       const updateRoomStatus = async (attempt = 1) => {
         try {
-          console.log(`Directly updating room ${roomId} status to completed (attempt ${attempt})`);
+          // First, update player status to completed
+          if (roomPlayerId) {
+            console.log(`Marking player ${roomPlayerId} as completed (attempt ${attempt})`);
+            // First direct update
+            const { error: playerUpdateError } = await supabase
+              .from('room_players')
+              .update({
+                status: 'completed',
+                completed_at: new Date().toISOString(),
+                completion_status: 'completed'
+              })
+              .eq('id', roomPlayerId);
+              
+            if (playerUpdateError) {
+              console.error('Error updating player status:', playerUpdateError);
+            } else {
+              console.log('Player status directly updated to completed');
+            }
+            
+            // Then call the RPC function for additional processing
+            const { error: playerError } = await supabase
+              .rpc('mark_player_completed', { player_id: roomPlayerId });
+              
+            if (playerError) {
+              console.error('Error updating player status via RPC:', playerError);
+            } else {
+              console.log('Player status successfully updated to completed via RPC');
+            }
+
+            // Add a delay to ensure database consistency before checking player counts
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+          
+          // Check if all players are completed
+          const { data: playerCounts, error: countsError } = await supabase
+            .from('room_players')
+            .select('id, status')
+            .eq('room_id', roomId)
+            .neq('status', 'left');
+            
+          if (countsError) {
+            console.error('Error checking player counts:', countsError);
+          } else if (playerCounts) {
+            const totalPlayers = playerCounts.length;
+            const completedPlayers = playerCounts.filter(p => p.status === 'completed').length;
+            const inGamePlayers = playerCounts.filter(p => p.status === 'in_game').length;
+            
+            console.log(`Room status check: ${completedPlayers}/${totalPlayers} completed, ${inGamePlayers} still in game`);
+            
+            // Check room status directly
+            const { data: roomData, error: roomCheckError } = await supabase
+              .from('game_rooms')
+              .select('status, all_players_completed')
+              .eq('id', roomId)
+              .single();
+              
+            const roomAlreadyCompleted = roomData?.status === 'completed';
+            console.log('Current room status:', roomData?.status, 'All players completed flag:', roomData?.all_players_completed);
+            
+            // Force room completion if all players except at most 1 are completed OR if this is the last player
+            if ((totalPlayers > 0 && completedPlayers >= totalPlayers - 1) || 
+                (totalPlayers > 0 && inGamePlayers === 0 && !roomAlreadyCompleted)) {
+              console.log('All or almost all players completed, updating room status');
+              
+              // Update any remaining in-game players to completed
+              if (inGamePlayers > 0) {
+                const inGamePlayerIds = playerCounts
+                  .filter(p => p.status === 'in_game')
+                  .map(p => p.id);
+                  
+                console.log(`Marking remaining players as completed: ${inGamePlayerIds.join(', ')}`);
+                
+                for (const playerId of inGamePlayerIds) {
+                  await supabase
+                    .from('room_players')
+                    .update({
+                      status: 'completed',
+                      completed_at: new Date().toISOString(),
+                      completion_status: 'completed'
+                    })
+                    .eq('id', playerId);
+                    
+                  await supabase.rpc('mark_player_completed', { player_id: playerId });
+                }
+              }
+              
+              // Try force_check_room_completion function first
+              console.log('Calling force_check_room_completion RPC function');
+              const { data: forceCheckResult, error: forceCheckError } = await supabase
+                .rpc('force_check_room_completion', { room_id_param: roomId });
+                
+              if (forceCheckError) {
+                console.error('Error in force_check_room_completion:', forceCheckError);
+              } else {
+                console.log('force_check_room_completion result:', forceCheckResult);
+              }
+              
+              // Mark the room as completed directly as well
+              console.log('Directly updating room status to completed');
           const { error: roomError } = await supabase
             .from('game_rooms')
             .update({ 
               status: 'completed',
+                  all_players_completed: true,
+                  completion_time: new Date().toISOString(),
               ended_at: new Date().toISOString()
             })
             .eq('id', roomId);
             
           if (roomError) {
-            console.error('Error directly updating room status:', roomError);
-            if (attempt < 3) {
+                console.error('Error updating room status:', roomError);
+                if (attempt < 5) { // Increase max attempts to 5
               const delay = Math.pow(2, attempt) * 1000;
-              console.log(`Will retry updating room status in ${delay}ms`);
+                  console.log(`Will retry updating room status in ${delay}ms (attempt ${attempt + 1}/5)`);
               setTimeout(() => updateRoomStatus(attempt + 1), delay);
             }
           } else {
             console.log('Room status successfully updated to completed');
           }
           
-          if (roomPlayerId) {
-            const { error: playerError } = await supabase
-              .rpc('mark_player_completed', { player_id: roomPlayerId });
+              // Verify the room status was updated
+              const { data: verifyRoom } = await supabase
+                .from('game_rooms')
+                .select('status, all_players_completed')
+                .eq('id', roomId)
+                .single();
+                
+              if (verifyRoom?.status !== 'completed') {
+                console.error('VERIFICATION FAILED: Room status still not completed after update, will retry');
+                if (attempt < 5) {
+                  const delay = 2000;
+                  console.log(`Immediate retry attempt ${attempt + 1}/5`);
+                  setTimeout(() => updateRoomStatus(attempt + 1), delay);
+                }
+              } else {
+                console.log('VERIFICATION SUCCESS: Room status correctly set to completed');
+              }
               
-            if (playerError) {
-              console.error('Error updating player status:', playerError);
-            } else {
-              console.log('Player status successfully updated to completed');
+              // Update all game sessions for this room
+              await supabase
+                .from('game_sessions')
+              .update({ 
+                completed_at: new Date().toISOString()
+              })
+                .eq('room_id', roomId)
+                .is('completed_at', null);
             }
           }
           
+          // Add game result record
           try {
             const { data: { session } } = await supabase.auth.getSession();
             if (session && sessionId) {
@@ -934,7 +1288,13 @@ function Game() {
             console.error('Error adding game result:', resultError);
           }
         } catch (error) {
-          console.error('Error in direct room update:', error);
+          console.error('Error in room update process:', error);
+          // Retry on error
+          if (attempt < 5) {
+            const delay = Math.pow(2, attempt) * 1000;
+            console.log(`Error occurred, retrying room status update in ${delay}ms (attempt ${attempt + 1}/5)`);
+            setTimeout(() => updateRoomStatus(attempt + 1), delay);
+          }
         }
       };
       
@@ -1029,106 +1389,159 @@ function Game() {
     navigate('/');
   };
 
-  const handleReturnToDashboard = async () => {
+  const handleReturnToDashboard = useCallback(async () => {
+    if (!supabase || !roomPlayerId) return;
+
     try {
-      console.log('Return to Dashboard clicked');
+      console.log('Updating player status to completed...');
       
-      if (roomPlayerId) {
-        console.log(`Step 1: Marking player ${roomPlayerId} as completed`);
-        
-        // First manually update the player status directly in the database
-        const { error: directUpdateError } = await supabase
-          .from('room_players')
-          .update({ 
-            status: 'completed',
-            completed_at: new Date().toISOString(),
-            completion_status: 'completed'
-          })
-          .eq('id', roomPlayerId);
+      // First, directly update the player status
+      const { error: updateError } = await supabase
+        .from('room_players')
+        .update({
+          status: 'completed',
+          completed_at: new Date().toISOString(),
+          completion_status: 'completed'
+        })
+        .eq('id', roomPlayerId);
+      
+      if (updateError) {
+        console.error('Error updating player status:', updateError);
+      } else {
+        console.log('Successfully updated player status to completed');
+      }
+      
+      // Second, call the mark_player_completed RPC function for redundancy
+      try {
+        console.log('Calling mark_player_completed RPC function...');
+        const { data: rpcData, error: rpcError } = await supabase
+          .rpc('mark_player_completed', {
+            player_id: roomPlayerId
+          });
           
-        if (directUpdateError) {
-          console.error('Error directly updating player status:', directUpdateError);
+        if (rpcError) {
+          console.error('Error calling mark_player_completed:', rpcError);
         } else {
-          console.log('SUCCESS: Player directly marked as completed in database');
+          console.log('Successfully called mark_player_completed RPC function:', rpcData);
         }
+      } catch (e) {
+        console.error('Exception in mark_player_completed call:', e);
+      }
+      
+      // Check if we're the last player to complete
+      const { data: roomPlayers, error: playersError } = await supabase
+        .from('room_players')
+        .select('status')
+        .eq('room_id', roomId)
+        .neq('status', 'left');
+      
+      if (!playersError && roomPlayers) {
+        const totalPlayers = roomPlayers.length;
+        const completedPlayers = roomPlayers.filter(p => p.status === 'completed').length;
         
-        // Wait for a moment to ensure database consistency
-        console.log('Step 2: Waiting for database to process updates...');
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log(`Room completion check: ${completedPlayers}/${totalPlayers} players completed`);
         
-        if (roomId) {
-          console.log(`Step 3: Force checking room ${roomId} completion status`);
+        if (totalPlayers > 0 && completedPlayers === totalPlayers) {
+          console.log('All players have completed, ensuring room is marked as completed');
           
-          // Use our new force check function
-          try {
-            const { data: forceCheckResult, error: forceCheckError } = await supabase
-              .rpc('force_check_room_completion', { room_id_param: roomId });
-            
-            if (forceCheckError) {
-              console.error('Error force checking room completion:', forceCheckError);
-              
-              // Fallback to direct update
-              console.log('Step 3b: Fallback - Direct room update');
-              
-              // Get player counts
-              const { data: playerCounts, error: countsError } = await supabase
-                .from('room_players')
-                .select('id, status')
-                .eq('room_id', roomId)
-                .neq('status', 'left');
-                
-              if (countsError) {
-                console.error('Error getting player counts:', countsError);
-              } else if (playerCounts) {
-                const totalPlayers = playerCounts.length;
-                const completedPlayers = playerCounts.filter(p => p.status === 'completed').length;
-                
-                console.log(`DIRECT COUNT: ${completedPlayers} out of ${totalPlayers} players completed`);
-                console.log('Player details:', JSON.stringify(playerCounts));
-                
-                // If all players are now completed, mark the room as completed
-                if (totalPlayers > 0 && completedPlayers === totalPlayers) {
-                  console.log('All players completed, directly updating room status');
-                  
-                  const { error: roomUpdateError } = await supabase
-                    .from('game_rooms')
-                    .update({
-                      status: 'completed',
-                      all_players_completed: true,
-                      completion_time: new Date().toISOString(),
-                      ended_at: new Date().toISOString()
-                    })
-                    .eq('id', roomId);
-                    
-                  if (roomUpdateError) {
-                    console.error('Error updating room status:', roomUpdateError);
-                  } else {
-                    console.log('SUCCESS: Room marked as completed directly');
-                  }
-                } else {
-                  console.log(`Not all players completed yet: ${completedPlayers}/${totalPlayers}`);
-                }
-              }
-            } else {
-              console.log(`Force check result: ${forceCheckResult ? 'Room updated' : 'No update needed'}`);
-            }
-          } catch (forceError) {
-            console.error('Exception in force check:', forceError);
+          // Force update room status directly as final fallback
+          const { error: roomUpdateError } = await supabase
+            .from('game_rooms')
+            .update({
+              status: 'completed',
+              all_players_completed: true,
+              completion_time: new Date().toISOString(),
+              ended_at: new Date().toISOString()
+            })
+            .eq('id', roomId);
+          
+          if (roomUpdateError) {
+            console.error('Error updating room status:', roomUpdateError);
+          } else {
+            console.log('Successfully updated room status to completed');
           }
         }
       }
+
+      // Add a final verification check to ensure all updates are properly propagated:
+
+      // Add a final verification check to ensure all player statuses are properly updated
+      console.log('Performing final status verification check...');
       
-      // Give ample time for all operations to complete
-      console.log('Step 4: Waiting before navigation...');
-      setTimeout(() => {
-        console.log('Step 5: Navigating to dashboard');
-        navigate('/dashboard');
-      }, 1500);
+      try {
+        // Get all players in the room
+        const { data: allRoomPlayers } = await supabase
+          .from('room_players')
+          .select('id, status')
+          .eq('room_id', roomId)
+          .neq('status', 'left');
+        
+        if (allRoomPlayers && allRoomPlayers.length > 0) {
+          const inGameCount = allRoomPlayers.filter(p => p.status === 'in_game').length;
+          const completedCount = allRoomPlayers.filter(p => p.status === 'completed').length;
+          const totalActive = allRoomPlayers.length;
+          
+          console.log(`Final status check: ${completedCount}/${totalActive} completed, ${inGameCount} still in game`);
+          
+          // If almost all players are completed (all except possibly 1), force update everything
+          if (completedCount >= totalActive - 1 && inGameCount <= 1) {
+            console.log('Almost all players completed. Performing final cleanup...');
+            
+            // Force update room to completed state
+            await supabase
+              .from('game_rooms')
+              .update({
+                status: 'completed',
+                all_players_completed: true,
+                completion_time: new Date().toISOString(),
+                ended_at: new Date().toISOString()
+              })
+              .eq('id', roomId);
+            
+            // Force update any remaining in_game players to completed
+            const inGamePlayers = allRoomPlayers.filter(p => p.status === 'in_game');
+            for (const player of inGamePlayers) {
+              console.log(`Forcing completion status for player ${player.id}`);
+              
+              // Direct update
+              await supabase
+                .from('room_players')
+                .update({
+                  status: 'completed',
+                  completed_at: new Date().toISOString(),
+                  completion_status: 'completed'
+                })
+                .eq('id', player.id);
+              
+              // RPC call for good measure
+              await supabase.rpc('mark_player_completed', { player_id: player.id });
+            }
+            
+            // Force update all related game sessions
+            await supabase
+              .from('game_sessions')
+              .update({
+                completed_at: new Date().toISOString()
+              })
+              .eq('room_id', roomId)
+              .is('completed_at', null);
+              
+            console.log('Finished final cleanup of room and player statuses');
+          }
+        }
+      } catch (verifyError) {
+        console.error('Error in final verification:', verifyError);
+      }
+      
+      // Wait a bit longer to ensure all database operations complete
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      navigate('/dashboard');
     } catch (error) {
-      console.error('Error returning to dashboard:', error);
+      console.error('Error in handleReturnToDashboard:', error);
       navigate('/dashboard');
     }
-  };
+  }, [roomPlayerId, roomId, sessionId, navigate, supabase]);
 
   if (shouldShowCompletionScreen) {
     return (
@@ -1192,7 +1605,7 @@ function Game() {
           <div className="mt-8 text-center text-gray-400">
             <p>Your trading analysis report will be available to game administrators.</p>
             <p className="text-sm mt-2">This helps maintain fair competition and prevents gaming of the system.</p>
-          </div>
+              </div>
         </div>
       </div>
     );
@@ -1501,7 +1914,7 @@ function Game() {
             className={`px-8 py-3 rounded-lg text-lg font-semibold ${
               loading || gameCompleted || levelAdvanceLock || isPaused
                 ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
-                : 'bg-blue-600 hover:bg-blue-700 text-white'
+                  : 'bg-blue-600 hover:bg-blue-700 text-white'
             }`}
           >
             {loading ? 'Saving...' : 

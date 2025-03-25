@@ -29,6 +29,8 @@ interface GameRoom {
   created_at: string;
   started_at?: string;
   ended_at?: string;
+  completion_time?: string;
+  all_players_completed?: boolean;
   players: RoomPlayer[];
 }
 
@@ -48,12 +50,14 @@ interface GameResult {
   user_id: string;
   final_balance: number;
   rank: number;
+  profit_percentage?: number;
   user: {
     name: string | null;
     email: string | null;
   } | null;
   game_session: {
     personality_report: string | null;
+    trading_history?: string | null;
   } | null;
 }
 
@@ -70,6 +74,7 @@ function AdminDashboard() {
   const [error, setError] = useState<string | null>(null);
   const [deleteConfirmation, setDeleteConfirmation] = useState<string | null>(null);
   const [startingGame, setStartingGame] = useState(false);
+  const [endingGameConfirmation, setEndingGameConfirmation] = useState<string | null>(null);
   const [selectedRoom, setSelectedRoom] = useState<string | null>(null);
   const [results, setResults] = useState<GameResult[]>([]);
   const [showReport, setShowReport] = useState<string | null>(null);
@@ -128,92 +133,125 @@ function AdminDashboard() {
           if (eventType === 'UPDATE' && newRecord) {
             console.log('Room update detected:', newRecord);
             
-            // If the room status changed to completed
-            if (newRecord.status === 'completed') {
-              console.log('Room marked as completed, updating lists');
-              // Refresh both active and completed rooms
-              loadRoomsFast();
-              loadCompletedRooms();
+            if (newRecord.status === 'completed' || newRecord.all_players_completed === true) {
+              console.log(`Room ${newRecord.id} is now completed, moving to completed section`);
               
-              // If this is the selected room, reload its results
-              if (selectedRoom === newRecord.id) {
-                loadResults(newRecord.id);
-              }
+              setRooms(prevRooms => prevRooms.filter(room => room.id !== newRecord.id));
+              
+              loadCompletedRooms().then(completedRooms => {
+                setCompletedRooms(completedRooms);
+              });
             } else {
-              // For other updates, just refresh the rooms list
-              loadRoomsFast();
-            }
-          }
-        }
-        
-        if (table === 'room_players') {
-          if ((eventType === 'INSERT' || eventType === 'UPDATE') && newRecord) {
-            // For player changes, update the specific player in the specific room
-            console.log('Optimistically updating player in room');
-            
-            if (eventType === 'INSERT') {
-              // For new players, we need to fetch user data first
-              const { data: userData } = await supabase
-                .from('users')
-                .select('name, email')
-                .eq('id', newRecord.user_id)
-                .single();
-                
-              // Now update with the fetched user data
-              setRooms(prevRooms => {
-                return prevRooms.map(room => {
-                  if (room.id === newRecord.room_id) {
-                    // Check if player already exists (avoid duplicates)
-                    if (room.players.some(p => p.id === newRecord.id)) {
-                      return room;
+              // For rooms that should be visible in the Game Rooms section,
+              // ensure all_players_completed is FALSE for room status 'preparing' or 'in_progress'
+              if (newRecord.status === 'preparing' || newRecord.status === 'in_progress') {
+                if (newRecord.all_players_completed === true) {
+                  console.log(`Room ${newRecord.id} has status ${newRecord.status} but all_players_completed is TRUE. Fixing locally to ensure visibility.`);
+                  newRecord.all_players_completed = false;
+                  
+                  // Also fix in database to ensure consistency
+                  (async () => {
+                    try {
+                      await supabase.from('game_rooms')
+                        .update({ all_players_completed: false })
+                        .eq('id', newRecord.id);
+                      console.log(`Fixed all_players_completed for room ${newRecord.id} in database`);
+                    } catch (error) {
+                      console.error(`Error fixing room ${newRecord.id} visibility in database:`, error);
                     }
-                    
-                    // Add the new player with user data
-                    return {
-                      ...room,
-                      players: [...room.players, {
-                        ...newRecord,
-                        user: userData || { name: 'Loading...', email: '' }
-                      }]
-                    } as GameRoom;
-                  }
-                  return room;
-                });
-              });
-            }
-            else if (eventType === 'UPDATE') {
-              // For updated players, just update the existing player
-              setRooms(prevRooms => {
-                return prevRooms.map(room => {
-                  if (room.id === newRecord.room_id) {
-                    return {
-                      ...room,
-                      players: room.players.map(player => 
-                        player.id === newRecord.id
-                          ? { ...player, ...newRecord }
-                          : player
-                      )
-                    } as GameRoom;
-                  }
-                  return room;
-                });
-              });
-            }
-          }
-          else if (eventType === 'DELETE' && oldRecord) {
-            // For deleted player, remove from state
-            console.log('Optimistically removing player from room');
-            setRooms(prevRooms => {
-              return prevRooms.map(room => {
-                if (room.id === oldRecord.room_id) {
-                  return {
-                    ...room,
-                    players: room.players.filter(p => p.id !== oldRecord.id)
-                  } as GameRoom;
+                  })();
                 }
-                return room;
+              }
+              
+            setRooms(prevRooms => 
+              prevRooms.map(room => 
+                room.id === newRecord.id 
+                    ? { ...room, ...newRecord } 
+                  : room
+              )
+            );
+          }
+          } else if (eventType === 'INSERT' && newRecord) {
+            // Handle new room
+            // ... existing code ...
+          } else if (eventType === 'DELETE' && oldRecord) {
+            // Handle room deletion
+            // ... existing code ...
+          }
+        } else if (table === 'room_players') {
+          if ((eventType === 'UPDATE' || eventType === 'INSERT') && newRecord) {
+            console.log('Player update detected:', newRecord);
+            
+            // If a player status changed to completed, check if all players in that room are now completed
+            if (newRecord.status === 'completed') {
+              // Get room ID from the player record
+              const roomId = newRecord.room_id;
+              
+              // Find the current room in state
+              const existingRoom = rooms.find(room => room.id === roomId);
+              if (existingRoom) {
+                // Update the player in the current UI state first
+                setRooms(prevRooms => 
+                  prevRooms.map(room => {
+                    if (room.id !== roomId) return room;
+                    
+                    // Update this player's status and check if all are completed
+                    const updatedPlayers = room.players.map(player => 
+                        player.id === newRecord.id
+                        ? { ...player, status: 'completed' } 
+                          : player
+                    );
+                    
+                    // Check if all non-left players are now completed
+                    const activePlayers = updatedPlayers.filter(p => p.status !== 'left');
+                    const allCompleted = activePlayers.length > 0 && 
+                                       activePlayers.every(p => p.status === 'completed');
+                    
+                    if (allCompleted) {
+                      console.log(`All players in room ${roomId} are now completed`);
+                      
+                      // Update the room in the database
+                      supabase
+                        .from('game_rooms')
+                        .update({ 
+                          status: 'completed',
+                          all_players_completed: true,
+                          completion_time: new Date().toISOString()
+                        })
+                        .eq('id', roomId)
+                        .then(() => {
+                          // Remove from active rooms list
+                          setRooms(prevRooms => prevRooms.filter(room => room.id !== roomId));
+                          
+                          // Refresh completed rooms list
+                          loadCompletedRooms().then(completedRooms => {
+                            setCompletedRooms(completedRooms);
+                });
               });
-            });
+            }
+                    
+                    return { ...room, players: updatedPlayers };
+                  })
+                );
+              }
+            }
+            // Regular player update handling (for non-completed players)
+            else {
+              // Update the player in the current UI state
+              setRooms(prevRooms => 
+                prevRooms.map(room => {
+                  if (room.id !== newRecord.room_id) return room;
+                  
+                  const updatedPlayers = room.players.map(player => 
+                    player.id === newRecord.id 
+                      ? { ...player, status: newRecord.status } 
+                      : player
+                  );
+                  
+                  return { ...room, players: updatedPlayers };
+                })
+              );
+            }
           }
         }
         else if (table === 'game_results' && selectedRoom) {
@@ -301,11 +339,25 @@ function AdminDashboard() {
   const loadInitialData = async () => {
     try {
       setError(null);
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        navigate('/');
+        return;
+      }
+
+      // Load open rooms as before
       await loadRooms();
+      
+      // Also load completed rooms
+      const completedRoomsResult = await loadCompletedRooms();
+      setCompletedRooms(completedRoomsResult);
+      
       setRetryCount(0);
+      setLoading(false);
     } catch (error) {
       console.error('Error loading initial data:', error);
-      setError('Failed to load data. Retrying...');
+      setError('Failed to load some data. Retrying...');
+      setLoading(false);
     }
   };
 
@@ -341,20 +393,24 @@ function AdminDashboard() {
 
   const loadRooms = async () => {
     try {
-      console.log('Loading rooms...');
+      console.log('Loading game rooms...');
+      
+      // Only load rooms that are not completed - FIX: Corrected query syntax
       const { data: roomsData, error: roomsError } = await supabase
         .from('game_rooms')
         .select('*')
+        .or('status.eq.open,and(status.eq.in_progress,all_players_completed.eq.false)')
         .order('created_at', { ascending: false });
 
       if (roomsError) throw roomsError;
 
+      console.log(`Loaded ${roomsData?.length || 0} active rooms`);
+
       if (roomsData) {
-        console.log('Fetched rooms:', roomsData.length);
+        // Process rooms to include player data
         const roomsWithPlayers = await Promise.all(
           roomsData.map(async (room) => {
             try {
-              console.log(`Loading players for room ${room.id}...`);
               const { data: playersData, error: playersError } = await supabase
                 .from('room_players')
                 .select(`
@@ -368,25 +424,18 @@ function AdminDashboard() {
 
               if (playersError) throw playersError;
 
-              console.log(`Loaded ${playersData?.length || 0} players for room ${room.id}`);
-              return {
-                ...room,
-                players: playersData || [],
-              };
+              return { ...room, players: playersData || [] };
             } catch (error) {
-              console.error(`Error loading players for room ${room.id}:`, error);
+              console.error('Error loading players for room:', error);
               return { ...room, players: [] };
             }
           })
         );
 
-        console.log('Setting rooms with players:', roomsWithPlayers.length);
         setRooms(roomsWithPlayers);
-        setError(null);
       }
     } catch (error) {
       console.error('Error loading rooms:', error);
-      setError('Failed to load game rooms');
       throw error;
     }
   };
@@ -558,6 +607,7 @@ function AdminDashboard() {
         .update({
           status: 'in_progress',
           started_at: new Date().toISOString(),
+          all_players_completed: false // Explicitly set to false to ensure room visibility
         })
         .eq('id', roomId);
 
@@ -582,6 +632,76 @@ function AdminDashboard() {
     }
   };
 
+  const endGame = async (roomId: string) => {
+    try {
+      console.log(`Ending game for room ${roomId}`);
+      setError(null);
+
+      const room = rooms.find(r => r.id === roomId);
+      if (!room) {
+        throw new Error('Room not found');
+      }
+
+      // Get all in-game players in the room
+      const inGamePlayers = room.players.filter(p => p.status === 'in_game');
+      if (inGamePlayers.length === 0) {
+        console.log('No active players found in this room');
+      } else {
+        console.log(`Found ${inGamePlayers.length} active players to mark as completed`);
+      }
+
+      // Mark all players as completed
+      const updatePromises = inGamePlayers.map(player => {
+        return supabase
+          .from('room_players')
+          .update({
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+            completion_status: 'completed'
+          })
+          .eq('id', player.id);
+      });
+      
+      await Promise.all(updatePromises);
+      
+      // Update all game sessions for this room
+      const { error: sessionsError } = await supabase
+        .from('game_sessions')
+        .update({
+          completed_at: new Date().toISOString()
+        })
+        .eq('room_id', roomId)
+        .is('completed_at', null);
+        
+      if (sessionsError) {
+        console.error('Error updating game sessions:', sessionsError);
+      }
+
+      // Finally, mark the room as completed
+      const { error: roomError } = await supabase
+        .from('game_rooms')
+        .update({
+          status: 'completed',
+          ended_at: new Date().toISOString(),
+          completion_time: new Date().toISOString()
+        })
+        .eq('id', roomId);
+
+      if (roomError) throw roomError;
+      
+      console.log('Game successfully ended for room', roomId);
+      
+      // Reset confirmation state
+      setEndingGameConfirmation(null);
+      
+      // Refresh the rooms list
+      loadRoomsFast();
+    } catch (error) {
+      console.error('Error ending game:', error);
+      setError(error instanceof Error ? error.message : 'Failed to end game');
+    }
+  };
+
   const loadResults = async (roomId: string) => {
     try {
       setError(null);
@@ -600,13 +720,13 @@ function AdminDashboard() {
         console.log('Room is not completed yet, status:', roomData.status);
       }
       
-      // Fetch results regardless of room status
+      // Fetch results regardless of room status - include personality_report and trading_history
       const { data, error } = await supabase
         .from('game_results')
         .select(`
           *,
-          user:users(name, email),
-          game_session:game_sessions(personality_report)
+          user:users!user_id(name, email),
+          game_session:game_sessions!session_id(personality_report, trading_history)
         `)
         .eq('room_id', roomId)
         .order('final_balance', { ascending: false });
@@ -620,10 +740,26 @@ function AdminDashboard() {
         // Sort by final balance and assign ranks
         const sortedResults = [...data].sort((a, b) => b.final_balance - a.final_balance);
         
+        // Calculate profit percentage for each result
         for (let i = 0; i < sortedResults.length; i++) {
           sortedResults[i].rank = i + 1;
+          
+          // Calculate profit percentage (starting balance is 10000)
+          const startingBalance = 10000;
+          sortedResults[i].profit_percentage = ((sortedResults[i].final_balance - startingBalance) / startingBalance) * 100;
+          
+          // Process user data for each result
+          if (sortedResults[i].user_id && !sortedResults[i].user) {
+            console.log('Result missing user object but has user_id:', sortedResults[i].user_id);
+            // Try to use the user_id as a fallback for display
+            sortedResults[i].user = { 
+              name: `User-${sortedResults[i].user_id.substring(0, 8)}`,
+              email: '' 
+            };
+          }
         }
         
+        console.log('Processed results:', sortedResults);
         setResults(sortedResults);
       } else {
         console.log('No results found for room:', roomId);
@@ -692,17 +828,28 @@ function AdminDashboard() {
   // Add a priority data loader function for critical updates
   const loadRoomsFast = async () => {
     try {
-      console.log('Fast-loading rooms...');
-      // Skip detailed logging to reduce overhead
+      // Only load rooms that are not completed
       const { data: roomsData, error: roomsError } = await supabase
         .from('game_rooms')
         .select('*')
+        .or('status.eq.open,and(status.eq.in_progress,all_players_completed.eq.false)')
         .order('created_at', { ascending: false });
 
       if (roomsError) throw roomsError;
 
       if (roomsData) {
-        // Fast load of players - parallel fetch
+        // Track previously completed players to preserve their status
+        const prevCompletedPlayerMap = new Map();
+        rooms.forEach(room => {
+          room.players.forEach(player => {
+            if (player.status === 'completed') {
+              prevCompletedPlayerMap.set(player.id, true);
+            }
+          });
+        });
+        
+        console.log(`Fast loading ${roomsData.length} rooms with previously completed players: ${prevCompletedPlayerMap.size}`);
+
         const roomsWithPlayers = await Promise.all(
           roomsData.map(async (room) => {
             try {
@@ -712,179 +859,142 @@ function AdminDashboard() {
                   id,
                   user_id,
                   status,
+                  completed_at,
                   session_id,
                   user:users(name, email)
                 `)
                 .eq('room_id', room.id);
 
               if (playersError) throw playersError;
+              
+              // Process player data to ensure consistency
+              const processedPlayers = playersData?.map(player => {
+                // Convert any user object to consistent format
+                const userInfo = safeUserExtract(player.user as unknown as GameResult['user']);
+                
+                // Safety check for previously completed players
+                let status = player.status;
+                if (prevCompletedPlayerMap.has(player.id) && status !== 'left' && status !== 'completed') {
+                  console.warn(`Player ${player.id} was previously completed but now has status ${status}, fixing to completed`);
+                  status = 'completed';
+                }
+                
+                // Check if player has completed_at timestamp but not marked as completed
+                if (player.completed_at && status !== 'completed' && status !== 'left') {
+                  console.warn(`Player ${player.id} has completed_at timestamp but status is ${status}, fixing to completed`);
+                  status = 'completed';
+                }
+                
+                return {
+                  ...player,
+                  status,
+                  user: userInfo
+                };
+              }) || [];
+
+              // Are all non-left players completed?
+              const nonLeftPlayers = processedPlayers.filter(p => p.status !== 'left');
+              const allCompleted = nonLeftPlayers.length > 0 && 
+                                 nonLeftPlayers.every(p => p.status === 'completed');
+              
+              // If all players are completed, move this room to completed section
+              if (allCompleted && room.status !== 'completed') {
+                console.log(`All players in room ${room.id} are completed, updating room status`);
+                
+                // Update the room status in the database
+                await supabase
+                  .from('game_rooms')
+                  .update({ 
+                    status: 'completed',
+                    all_players_completed: true,
+                    completion_time: new Date().toISOString()
+                  })
+                  .eq('id', room.id);
+                  
+                // Remove this room from the active rooms list and refresh completed rooms
+                loadCompletedRooms().then(completedRooms => {
+                  setCompletedRooms(completedRooms);
+                });
+                
+                // Skip adding this room to active rooms
+                return null;
+              }
 
               return {
                 ...room,
-                players: playersData || [],
+                players: processedPlayers
               };
             } catch (error) {
+              console.error('Error in room processing:', error);
               return { ...room, players: [] };
             }
           })
         );
 
-        // Use functional update to avoid dependency on current state
-        setRooms(roomsWithPlayers);
-        setError(null);
+        // Filter out null entries (rooms that were moved to completed)
+        const validRooms = roomsWithPlayers.filter(room => room !== null);
+        
+        setRooms(validRooms);
       }
     } catch (error) {
-      console.error('Error fast-loading rooms:', error);
-      // Don't set error state to avoid UI disruption during fast updates
+      console.error('Error in fast room loading:', error);
+      // Avoid setting error state for fast updates to prevent UI disruptions
     }
+  };
+
+  // Helper function to safely get profit percentage
+  const getProfit = (result: GameResult): number => {
+    return result.profit_percentage !== undefined ? result.profit_percentage : 0;
   };
 
   // Helper function to safely extract user info
-  const safeUserExtract = (userObj: any): { name: string, email: string } => {
-    // If it's null or undefined
-    if (!userObj) return { name: 'Unknown', email: '' };
-    
-    // If it's an array (handle the error case)
-    if (Array.isArray(userObj)) {
-      return { name: 'Unknown', email: '' };
-    }
-    
-    // If it's an object with the right properties
-    if (typeof userObj === 'object') {
-      return {
-        name: typeof userObj.name === 'string' ? userObj.name : 'Unknown',
-        email: typeof userObj.email === 'string' ? userObj.email : ''
-      };
-    }
-    
-    // Default case
-    return { name: 'Unknown', email: '' };
+  const safeUserExtract = (user: GameResult['user']) => {
+    return {
+      name: user?.name || 'Unknown Player',
+      email: user?.email || ''
+    };
   };
 
-  // Enhance loadCompletedRooms to include more details
+  // Helper function to handle load errors with retry logic
+  const handleLoadError = (error: any) => {
+    console.error('Error loading data:', error);
+    setError(`Failed to load data: ${error.message || 'Unknown error'}`);
+    
+    // Implement retry logic with backoff
+    if (retryCount < maxRetries) {
+      const nextRetry = retryCount + 1;
+      setRetryCount(nextRetry);
+      
+      // Exponential backoff: 1s, 2s, 4s
+      const delay = Math.pow(2, nextRetry - 1) * 1000;
+      console.log(`Retrying in ${delay}ms (attempt ${nextRetry}/${maxRetries})...`);
+      
+      setTimeout(() => {
+        loadRoomsFast();
+      }, delay);
+    }
+  };
+
+  // Add this new function to load completed rooms
   const loadCompletedRooms = async () => {
     try {
       console.log('Loading completed rooms...');
-      const { data, error } = await supabase
-        .from('game_rooms')
-        .select(`
-          *,
-          players:room_players(
-            id,
-            user_id,
-            status,
-            session_id,
-            completed_at,
-            user:users(name, email)
-          ),
-          game_results(
-            id,
-            final_balance,
-            user:users(name, email)
-          )
-        `)
-        .eq('status', 'completed')
-        .order('ended_at', { ascending: false });
-
-      if (error) throw error;
       
-      if (data) {
-        console.log(`Found ${data.length} completed rooms`);
-        setCompletedRooms(data);
+      // Use the function we created in the database
+      const { data: completedRoomsData, error: completedRoomsError } = await supabase
+        .rpc('get_completed_rooms_with_players');
+
+      if (completedRoomsError) {
+        console.error('Error loading completed rooms:', completedRoomsError);
+        return [];
       }
+
+      console.log(`Loaded ${completedRoomsData?.length || 0} completed rooms`);
+      return completedRoomsData || [];
     } catch (error) {
-      console.error('Error loading completed rooms:', error);
+      console.error('Error in loadCompletedRooms:', error);
+      return [];
     }
-  };
-
-  // Add an effect to refresh completed rooms periodically as backup
-  useEffect(() => {
-    const completedRoomsInterval = setInterval(() => {
-      if (isAdmin) {
-        loadCompletedRooms();
-      }
-    }, 5000); // Check every 5 seconds
-    
-    return () => clearInterval(completedRoomsInterval);
-  }, [isAdmin]);
-
-  // Modify the results section to only show for admins
-  const renderResults = () => {
-    if (!isAdmin) {
-      return (
-        <div className="text-center text-gray-400 mt-4">
-          Only administrators can view detailed game results.
-        </div>
-      );
-    }
-
-    return (
-      <div className="mt-8">
-        <h3 className="text-xl font-semibold mb-4">Game Results</h3>
-        <div className="bg-gray-800 rounded-lg overflow-hidden">
-          <table className="w-full">
-            <thead>
-              <tr className="bg-gray-700">
-                <th className="py-3 px-4 text-left">Rank</th>
-                <th className="py-3 px-4 text-left">Player</th>
-                <th className="py-3 px-4 text-right">Final Balance</th>
-                <th className="py-3 px-4 text-center">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {results.map((result) => (
-                <tr key={result.id} className="border-t border-gray-700">
-                  <td className="py-3 px-4">
-                    {result.rank === 1 ? '🥇' : 
-                     result.rank === 2 ? '🥈' : 
-                     result.rank === 3 ? '🥉' : 
-                     `#${result.rank}`}
-                  </td>
-                  <td className="py-3 px-4">{result.user?.name || 'Unknown Player'}</td>
-                  <td className="py-3 px-4 text-right">${result.final_balance.toFixed(2)}</td>
-                  <td className="py-3 px-4 text-center">
-                    <button
-                      onClick={() => setShowReport(result.id)}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
-                    >
-                      View Report
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  };
-
-  // Modify the completed rooms section to show real-time updates
-  const renderCompletedRooms = () => {
-    if (!isAdmin) return null;
-
-    return (
-      <div className="mt-8">
-        <h2 className="text-2xl font-bold mb-4">Completed Rooms</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {completedRooms.map((room) => (
-            <div key={room.id} className="bg-gray-800 rounded-lg p-4">
-              <h3 className="text-lg font-semibold mb-2">{room.name}</h3>
-              <p className="text-gray-400 mb-2">Completed at: {room.ended_at ? new Date(room.ended_at).toLocaleString() : 'Unknown'}</p>
-              <button
-                onClick={() => {
-                  setSelectedRoom(room.id);
-                  loadResults(room.id);
-                }}
-                className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors w-full"
-              >
-                View Results
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
   };
 
   if (loading) {
@@ -1212,13 +1322,18 @@ function AdminDashboard() {
                                 #{result.rank}
                               </div>
                               <div>
-                                <p className="font-semibold">{result.user?.name || 'Unknown'}</p>
-                                <p className="text-sm text-gray-400">{result.user?.email || 'Unknown'}</p>
+                                <p className="font-semibold">{safeUserExtract(result.user).name}</p>
+                                <p className="text-sm text-gray-400">{safeUserExtract(result.user).email}</p>
                               </div>
                             </div>
                             <div className="flex items-center gap-4">
+                              <div>
                               <div className="text-green-500 font-bold">
                                 ${result.final_balance.toFixed(2)}
+                                </div>
+                                <div className={`text-xs ${getProfit(result) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                  {getProfit(result) >= 0 ? '+' : ''}{getProfit(result).toFixed(2)}%
+                                </div>
                               </div>
                               <button
                                 onClick={() => setShowReport(result.id)}
@@ -1240,9 +1355,22 @@ function AdminDashboard() {
                                   <X size={20} />
                                 </button>
                               </div>
-                              <p className="text-gray-300 whitespace-pre-wrap">
+                              <div className="mb-4">
+                                <h5 className="text-sm font-medium text-blue-400 mb-1">Performance Summary</h5>
+                                <div className="flex items-center gap-2 mb-2">
+                                  <Trophy size={16} className={getProfit(result) >= 0 ? 'text-green-500' : 'text-red-500'} />
+                                  <span className="text-white">Final Balance: <span className="font-bold">${result.final_balance.toFixed(2)}</span></span>
+                                  <span className={`text-sm ${getProfit(result) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                    ({getProfit(result) >= 0 ? '+' : ''}{getProfit(result).toFixed(2)}%)
+                                  </span>
+                                </div>
+                              </div>
+                              <div>
+                                <h5 className="text-sm font-medium text-blue-400 mb-1">Personality Analysis</h5>
+                                <p className="text-gray-300 whitespace-pre-wrap mb-3">
                                 {result.game_session?.personality_report || 'No analysis available'}
                               </p>
+                              </div>
                             </div>
                           )}
                         </div>
@@ -1260,8 +1388,8 @@ function AdminDashboard() {
                         className="flex justify-between items-center bg-gray-600 p-2 rounded"
                       >
                         <div>
-                          <p className="font-medium">{player.user?.name || 'Unknown'}</p>
-                          <p className="text-sm text-gray-400">{player.user?.email || 'Unknown'}</p>
+                          <p className="font-medium">{safeUserExtract(player.user).name}</p>
+                          <p className="text-sm text-gray-400">{safeUserExtract(player.user).email}</p>
                         </div>
                         <div className="flex items-center gap-2">
                           <span className={`px-2 py-1 rounded-full text-sm ${
@@ -1282,7 +1410,68 @@ function AdminDashboard() {
           </div>
         </div>
 
-        {renderCompletedRooms()}
+        <div className="mt-8">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold text-white">Completed Rooms</h2>
+            <button
+              onClick={() => setShowCompletedRooms(!showCompletedRooms)}
+              className="flex items-center bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-lg"
+            >
+              {showCompletedRooms ? 'Hide Completed Rooms' : 'Show Completed Rooms'}
+            </button>
+          </div>
+          
+          {showCompletedRooms && (
+            <div className="mt-8 bg-gray-800 p-6 rounded-lg">
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-xl font-bold flex items-center gap-2">
+                  <Check className="text-green-500" />
+                  Completed Rooms
+                </h2>
+              </div>
+
+              <div className="space-y-6">
+                {completedRooms.length === 0 ? (
+                  <div className="text-center py-8 text-gray-400">
+                    <p>No completed rooms found.</p>
+                  </div>
+                ) : (
+                  completedRooms.map((room) => (
+                    <div key={room.id} className="bg-gray-700 p-4 rounded-lg">
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <h3 className="text-lg font-semibold">{room.name}</h3>
+                          <p className="text-sm text-gray-400">
+                            Completed {room.ended_at ? new Date(room.ended_at).toLocaleString() : 'Unknown'}
+                          </p>
+                          <p className="text-sm text-gray-400">
+                            {room.players?.length || 0} player(s)
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => navigate(`/leaderboard/${room.id}`)}
+                            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded"
+                          >
+                            <Trophy size={16} />
+                            View Results
+                          </button>
+                          <button
+                            onClick={() => deleteRoom(room.id)}
+                            className="flex items-center gap-2 bg-red-600 hover:bg-red-700 px-3 py-1 rounded"
+                          >
+                            <Trash2 size={16} />
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

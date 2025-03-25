@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import Register from './pages/Register';
 import AdminDashboard from './pages/AdminDashboard';
 import WaitingRoom from './pages/WaitingRoom';
+import Leaderboard from './pages/Leaderboard';
 import ProtectedRoute from './components/ProtectedRoute';
 
 function App() {
@@ -49,6 +50,14 @@ function App() {
             element={
               <ProtectedRoute requireAdmin={true}>
                 <AdminDashboard />
+              </ProtectedRoute>
+            } 
+          />
+          <Route 
+            path="/leaderboard/:roomId" 
+            element={
+              <ProtectedRoute requireAdmin={true}>
+                <Leaderboard />
               </ProtectedRoute>
             } 
           />

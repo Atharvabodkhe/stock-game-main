@@ -500,6 +500,29 @@ function Dashboard() {
         return;
       }
 
+      // IMPROVED APPROACH: First check all game_sessions to see if any are completed
+      // This is the most reliable way to determine if a game is truly active
+      const { data: activeSessions, error: sessionQueryError } = await supabase
+        .from('game_sessions')
+        .select('id, completed_at, room_id')
+        .eq('user_id', session.user.id)
+        .is('completed_at', null)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (sessionQueryError) {
+        console.error('Error querying active sessions:', sessionQueryError);
+      }
+
+      // If we don't find any active sessions without completed_at, then skip the player check
+      if (!activeSessions || activeSessions.length === 0) {
+        console.log('No active game sessions found without completed_at timestamp');
+        
+        // Extra safeguard: Update any players that might be stuck in 'in_game' status
+        await cleanupPlayerStatus(session.user.id);
+        return;
+      }
+      
       // Check if player has an active game in progress
       const { data: playerData, error: playerError } = await supabase
         .from('room_players')
@@ -508,7 +531,8 @@ function Dashboard() {
           room_id,
           status,
           session_id,
-          game_rooms(status)
+          completed_at,
+          game_rooms(status, all_players_completed)
         `)
         .eq('user_id', session.user.id)
         .eq('status', 'in_game')
@@ -516,29 +540,128 @@ function Dashboard() {
 
       if (playerError && playerError.code !== 'PGRST116') throw playerError;
 
-      if (playerData?.session_id) {
-        // Store the session ID but don't navigate automatically
-        setActiveGameSession(playerData.session_id);
-        
-        // Show a notification instead of redirecting
-        console.log('You have an active game. You can resume from the dashboard.');
+      if (!playerData || !playerData.session_id) {
+        console.log('No active player record found with in_game status');
         return;
       }
-
-      // Check if player is in a waiting room
-      const { data: waitingData } = await supabase
-        .from('room_players')
-        .select('room_id')
-        .eq('user_id', session.user.id)
-        .eq('status', 'joined')
-        .maybeSingle();
-
-      if (waitingData) {
-        // Store the waiting room info but don't navigate automatically
-        console.log('You are in a waiting room. You can join from the dashboard.');
+        
+      // CRITICAL CHECK: Verify this session/player is truly active before showing resume button
+      
+      // 1. Check if the session is marked as completed (most reliable)
+      const { data: sessionData } = await supabase
+        .from('game_sessions')
+        .select('completed_at')
+        .eq('id', playerData.session_id)
+        .single();
+        
+      if (sessionData && sessionData.completed_at) {
+        console.log('Game session has completed_at timestamp, cleaning up player status');
+        await fixPlayerStatus(playerData.id);
+        return; // Don't show resume button
       }
+      
+      // 2. Check if the room is marked as completed
+      if (playerData.game_rooms && 
+          typeof playerData.game_rooms === 'object' && 
+          'status' in playerData.game_rooms &&
+          'all_players_completed' in playerData.game_rooms &&
+          (playerData.game_rooms.status === 'completed' || 
+           playerData.game_rooms.all_players_completed === true)) {
+        console.log('Game room is completed, cleaning up player status');
+        await fixPlayerStatus(playerData.id);
+        return; // Don't show resume button
+      }
+      
+      // 3. Check if other players in the same session are already marked as completed
+      // This handles the "last player" case where all others are completed
+      const { data: otherPlayers } = await supabase
+        .from('room_players')
+        .select('id, status')
+        .eq('room_id', playerData.room_id)
+        .neq('id', playerData.id)
+        .neq('status', 'left');
+        
+      const allOthersCompleted = otherPlayers && 
+                                 otherPlayers.length > 0 && 
+                                 otherPlayers.every(p => p.status === 'completed');
+                                 
+      if (allOthersCompleted) {
+        console.log('All other players are completed, this must be the last player');
+        console.log('Cleaning up player status and preventing resume');
+        await fixPlayerStatus(playerData.id);
+        return; // Don't show resume button
+      }
+
+      // If we get here, the session is truly active and in progress
+      console.log('Found valid active game session:', playerData.session_id);
+      setActiveGameSession(playerData.session_id);
+      
+      // Show a notification instead of redirecting
+      console.log('You have an active game. You can resume from the dashboard.');
+      return;
     } catch (error) {
       console.error('Error checking active game:', error);
+    }
+  };
+
+  // Helper function to fix player status
+  const fixPlayerStatus = async (playerId: string) => {
+    try {
+      console.log('Fixing player status for player ID:', playerId);
+      
+      // First, direct update
+      await supabase
+        .from('room_players')
+        .update({ 
+          status: 'completed',
+          completed_at: new Date().toISOString(),
+          completion_status: 'completed'
+        })
+        .eq('id', playerId);
+        
+      // Then call the function for added assurance
+      try {
+        await supabase.rpc('mark_player_completed', { player_id: playerId });
+        console.log('Player status successfully fixed');
+      } catch (e) {
+        console.error('Error in mark_player_completed while fixing status:', e);
+      }
+    } catch (error) {
+      console.error('Error fixing player status:', error);
+    }
+  };
+  
+  // Helper function to clean up any lingering player statuses
+  const cleanupPlayerStatus = async (userId: string) => {
+    try {
+      // Find any players stuck in 'in_game' status
+      const { data: stuckPlayers } = await supabase
+        .from('room_players')
+        .select('id, session_id')
+        .eq('user_id', userId)
+        .eq('status', 'in_game');
+        
+      if (stuckPlayers && stuckPlayers.length > 0) {
+        console.log(`Found ${stuckPlayers.length} players stuck in 'in_game' status, cleaning up`);
+        
+        for (const player of stuckPlayers) {
+          // Check if their session is actually completed
+          if (player.session_id) {
+            const { data: sessionData } = await supabase
+              .from('game_sessions')
+              .select('completed_at')
+              .eq('id', player.session_id)
+              .single();
+              
+            if (sessionData && sessionData.completed_at) {
+              console.log(`Session ${player.session_id} is completed, fixing player ${player.id}`);
+              await fixPlayerStatus(player.id);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in cleanup routine:', error);
     }
   };
 
@@ -998,31 +1121,6 @@ function Dashboard() {
               ))}
               {rooms.length === 0 && (
                 <p className="text-gray-400">No rooms available. Wait for an admin to create one.</p>
-              )}
-            </div>
-          </div>
-  
-          <div className="bg-gray-800 rounded-lg p-6 mb-8">
-            <h2 className="text-xl font-semibold text-white mb-4">Completed Rooms</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {completedRooms.map((room) => (
-                <div key={room.id} className="bg-gray-700 p-4 rounded-lg">
-                  <div className="flex justify-between items-center mb-3">
-                    <h3 className="text-lg font-semibold">{room.name}</h3>
-                    <div className="flex items-center gap-2">
-                      <Users size={18} className="text-gray-400" />
-                      <span className="text-gray-400">
-                        {room.players.length} players completed
-                      </span>
-                    </div>
-                  </div>
-                  <div className="text-sm text-gray-400">
-                    Completed at: {room.completion_time ? new Date(room.completion_time).toLocaleString() : 'Unknown'}
-                  </div>
-                </div>
-              ))}
-              {completedRooms.length === 0 && (
-                <p className="text-gray-400">No completed rooms yet.</p>
               )}
             </div>
           </div>

@@ -24,6 +24,58 @@ interface Room {
   players: Player[];
 }
 
+const FetchUserName = ({ userId }: { userId: string }) => {
+  const [userName, setUserName] = useState<string>('Loading...');
+  
+  useEffect(() => {
+    const fetchUserName = async () => {
+      if (!userId) {
+        setUserName('Anonymous Player');
+        return;
+      }
+      
+      try {
+        // First try to get the user from the users table
+        const { data, error } = await supabase
+          .from('users')
+          .select('name, email')
+          .eq('id', userId)
+          .single();
+          
+        // If we have a name in the users table, use it
+        if (!error && data && data.name) {
+          setUserName(data.name);
+          return;
+        }
+        
+        // If we have an email but no name, use the email username part
+        if (!error && data && data.email) {
+          const emailName = data.email.split('@')[0];
+          setUserName(emailName);
+          return;
+        }
+        
+        // Get user metadata from auth session (this doesn't require admin)
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session && session.user.id === userId && session.user.user_metadata?.name) {
+          setUserName(session.user.user_metadata.name);
+          return;
+        }
+        
+        // If all else fails, use a friendly name
+        setUserName('Player ' + (Math.floor(Math.random() * 1000) + 1));
+      } catch (error) {
+        console.error('Error in fetchUserName:', error);
+        setUserName('Player ' + (Math.floor(Math.random() * 1000) + 1));
+      }
+    };
+    
+    fetchUserName();
+  }, [userId]);
+  
+  return <p className="font-semibold">{userName}</p>;
+};
+
 export default function WaitingRoom() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -146,11 +198,26 @@ export default function WaitingRoom() {
                 // Fetch the user data on the next tick to avoid blocking the update
                 setTimeout(async () => {
                   try {
-                    const { data: userData } = await supabase
+                    const { data: userData, error: userError } = await supabase
                       .from('users')
                       .select('name, email')
                       .eq('id', newRecord.user_id)
                       .single();
+                    
+                    // Use proper fallback for missing names
+                    let userName = 'Player ' + Math.floor(Math.random() * 1000 + 1);
+                    let userEmail = null;
+                    
+                    if (!userError && userData) {
+                      // If we have data in the users table
+                      if (userData.name) {
+                        userName = userData.name;
+                      } else if (userData.email) {
+                        // Use email name part if we have email but no name
+                        userName = userData.email.split('@')[0];
+                      }
+                      userEmail = userData.email;
+                    }
                     
                     setRoom(prev => {
                       if (!prev) return prev;
@@ -160,7 +227,10 @@ export default function WaitingRoom() {
                           ...prev.players.filter(p => p.id !== newRecord.id),
                           {
                             ...newRecord,
-                            user: userData || { name: 'Loading...', email: null }
+                            user: { 
+                              name: userName,
+                              email: userEmail 
+                            }
                           }
                         ]
                       };
@@ -177,7 +247,7 @@ export default function WaitingRoom() {
                     ...prev.players,
                     {
                       ...newRecord,
-                      user: { name: 'Loading...', email: null }
+                      user: { name: 'Player ' + Math.floor(Math.random() * 1000 + 1), email: null }
                     }
                   ]
                 };
@@ -248,7 +318,7 @@ export default function WaitingRoom() {
           user_id,
           status,
           session_id,
-          user:users(name, email)
+          user:users!user_id(name, email)
         `)
         .eq('room_id', roomId);
 
@@ -420,7 +490,11 @@ export default function WaitingRoom() {
                   }`}
                 >
                   <div>
-                    <p className="font-semibold">{player.user?.name || 'Anonymous Player'}</p>
+                    {player.user?.name ? (
+                      <p className="font-semibold">{player.user.name}</p>
+                    ) : (
+                      <FetchUserName userId={player.user_id} />
+                    )}
                     <p className="text-sm text-gray-400">{player.user?.email || 'No email'}</p>
                   </div>
                   <span className={`px-3 py-1 rounded-full text-sm ${

@@ -182,7 +182,7 @@ const analyzeTradingPatterns = (actions: TradingAction[]): TradingPatterns => {
     if (action.action === 'sell') {
       if (action.price > prevAction.price) {
         patterns.profitableExits++;
-      } else {
+    } else {
         patterns.lossyExits++;
       }
     }
