@@ -86,68 +86,147 @@ const Leaderboard: React.FC = () => {
         setRoomInfo(roomData);
       }
       
-      // Fetch results with related data
+      // First approach: Try to get data from game_results
       console.log('Fetching game results from database...');
-      const { data, error } = await supabase
+      
+      // Get the raw results first
+      const { data: resultsRaw, error: resultsError } = await supabase
         .from('game_results')
-        .select(`
-          *,
-          user:users(name, email),
-          game_session:game_sessions(personality_report, trading_history)
-        `)
+        .select('id, user_id, room_id, session_id, final_balance')
         .eq('room_id', roomId)
         .order('final_balance', { ascending: false });
-
-      if (error) {
-        console.error('Error fetching game results:', error);
-        throw error;
+        
+      if (resultsError) {
+        console.error('Error fetching basic game results:', resultsError);
+        throw resultsError;
       }
       
-      console.log(`Fetched ${data?.length || 0} results for room ${roomId}`);
+      console.log(`Fetched ${resultsRaw?.length || 0} raw results:`, resultsRaw);
       
-      if (data && data.length > 0) {
-        // Sort by final balance
-        const sortedResults = [...data].sort((a, b) => b.final_balance - a.final_balance);
+      if (resultsRaw && resultsRaw.length > 0) {
+        // Then fetch the related data separately
+        // 1. Get user data
+        const userIds = resultsRaw.map(r => r.user_id);
+        const { data: usersData } = await supabase
+          .from('users')
+          .select('id, name, email')
+          .in('id', userIds);
+          
+        console.log('User data:', usersData);
         
-        // Process results to match expected format
-        const processedResults = sortedResults.map((result, index) => {
+        // 2. Get session data
+        const sessionIds = resultsRaw.map(r => r.session_id).filter(id => id !== null);
+        const { data: sessionsData } = await supabase
+          .from('game_sessions')
+          .select('id, personality_report, trading_history')
+          .in('id', sessionIds);
+          
+        console.log('Session data:', sessionsData);
+        
+        // Now combine the data
+        const processedResults = resultsRaw.map((result, index) => {
+          // Find associated user and session
+          const user = usersData?.find(u => u.id === result.user_id);
+          const session = sessionsData?.find(s => s.id === result.session_id);
+          
+          // Calculate profit
           const startingBalance = 10000;
           const profit = ((result.final_balance - startingBalance) / startingBalance) * 100;
           
-          // Create a safe user object
-          const userObj = {
-            name: result.user && typeof result.user === 'object' && 'name' in result.user 
-              ? result.user.name || `User-${result.user_id.substring(0, 8)}`
-              : `User-${result.user_id.substring(0, 8)}`,
-            email: result.user && typeof result.user === 'object' && 'email' in result.user
-              ? result.user.email || ''
-              : ''
-          };
-          
-          // Create a safe game_session object
-          const gameSessionObj = {
-            personality_report: result.game_session && typeof result.game_session === 'object' && 'personality_report' in result.game_session
-              ? result.game_session.personality_report
-              : null,
-            trading_history: result.game_session && typeof result.game_session === 'object' && 'trading_history' in result.game_session
-              ? result.game_session.trading_history
-              : null
-          };
-          
           return {
-            ...result,
+            id: result.id,
+            user_id: result.user_id,
+            final_balance: result.final_balance,
             rank: index + 1,
             profit_percentage: profit,
-            user: userObj,
-            game_session: gameSessionObj
+            user: {
+              name: user?.name || `User-${result.user_id.substring(0, 8)}`,
+              email: user?.email || ''
+            },
+            game_session: {
+              personality_report: session?.personality_report || null,
+              trading_history: session?.trading_history || null
+            }
           };
         });
         
-        console.log('Processed results:', processedResults);
+        console.log('Final processed results:', processedResults);
         setResults(processedResults);
       } else {
-        console.log('No results found for room');
-        setResults([]);
+        // If no results from direct query, try using a stored procedure if available
+        console.log('No direct results found, trying alternative approach...');
+        
+        try {
+          const { data: altData, error: altError } = await supabase.rpc(
+            'get_game_results_for_room',
+            { room_id_param: roomId }
+          );
+          
+          if (altError) {
+            console.error('Error in alternative query:', altError);
+            setResults([]);
+          } else if (altData && altData.length > 0) {
+            console.log('Retrieved results using RPC method:', altData);
+            
+            // Process the RPC results
+            const mappedResults = altData.map((item: any, index: number) => ({
+              id: item.id || `result-${index}`,
+              user_id: item.user_id || '',
+              final_balance: item.final_balance || 10000,
+              rank: index + 1,
+              profit_percentage: item.final_balance ? ((item.final_balance - 10000) / 10000) * 100 : 0,
+              user: {
+                name: item.user_name || `User-${(item.user_id || '').substring(0, 8)}`,
+                email: item.user_email || ''
+              },
+              game_session: {
+                personality_report: item.personality_report || null,
+                trading_history: item.trading_history || null
+              }
+            }));
+            
+            setResults(mappedResults);
+          } else {
+            console.log('No results found with either method');
+            setResults([]);
+          }
+        } catch (rpcError) {
+          console.error('RPC method failed, checking last method:', rpcError);
+          
+          // Last resort - try to get data from game_sessions directly
+          try {
+            const { data: sessionData } = await supabase
+              .from('game_sessions')
+              .select('id, user_id, final_balance, personality_report')
+              .eq('room_id', roomId)
+              .order('final_balance', { ascending: false });
+              
+            if (sessionData && sessionData.length > 0) {
+              console.log('Found data from game_sessions:', sessionData);
+              
+              const fallbackResults = sessionData.map((session: any, index: number) => ({
+                id: session.id,
+                user_id: session.user_id,
+                final_balance: session.final_balance || 10000,
+                rank: index + 1,
+                profit_percentage: ((session.final_balance || 10000) - 10000) / 10000 * 100,
+                user: { name: `User-${session.user_id.substring(0, 8)}`, email: '' },
+                game_session: { 
+                  personality_report: session.personality_report,
+                  trading_history: null
+                }
+              }));
+              
+              setResults(fallbackResults);
+            } else {
+              console.log('No data available from any source');
+              setResults([]);
+            }
+          } catch (finalError) {
+            console.error('All data fetch methods failed:', finalError);
+            setResults([]);
+          }
+        }
       }
     } catch (error) {
       console.error('Error loading results:', error);

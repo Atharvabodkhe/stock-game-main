@@ -510,6 +510,14 @@ function AdminDashboard() {
       if (roomError) throw roomError;
 
       console.log('Room deleted successfully:', roomId);
+      
+      // Update local state to remove the deleted room
+      // Remove from active rooms if present
+      setRooms(prevRooms => prevRooms.filter(room => room.id !== roomId));
+      
+      // Remove from completed rooms if present
+      setCompletedRooms(prevRooms => prevRooms.filter(room => room.id !== roomId));
+      
       setDeleteConfirmation(null);
     } catch (error) {
       console.error('Error deleting room:', error);
@@ -949,7 +957,7 @@ function AdminDashboard() {
 
   // Helper function to safely extract user info
   const safeUserExtract = (user: GameResult['user']) => {
-    return {
+      return {
       name: user?.name || 'Unknown Player',
       email: user?.email || ''
     };
