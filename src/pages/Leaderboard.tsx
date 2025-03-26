@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { generatePersonalityReport } from '../lib/groq';
 import { 
   Users, 
   ArrowLeft, 
@@ -8,7 +9,17 @@ import {
   FileText, 
   X,
   TrendingUp,
-  TrendingDown
+  TrendingDown,
+  AlertCircle,
+  Search,
+  AnchorIcon,
+  Frame,
+  BadgeAlert,
+  Eye,
+  BarChart,
+  ArrowUpCircle,
+  ArrowDownCircle,
+  Pause
 } from 'lucide-react';
 
 interface GameResult {
@@ -27,6 +38,28 @@ interface GameResult {
   } | null;
 }
 
+interface TradingAction {
+  action: 'buy' | 'sell' | 'hold';
+  stock_name: string;
+  price: number;
+  quantity: number;
+  timestamp: string;
+  level?: number;
+}
+
+interface TradingStats {
+  totalTrades: number;
+  buyOrders: number;
+  sellOrders: number;
+  holdActions: number;
+  levelStats?: Record<number, {
+    totalTrades: number;
+    buyOrders: number;
+    sellOrders: number;
+    holdActions: number;
+  }>;
+}
+
 interface GameRoom {
   id: string;
   name: string;
@@ -41,6 +74,10 @@ const Leaderboard: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showReport, setShowReport] = useState<string | null>(null);
+  const [personalityReports, setPersonalityReports] = useState<Record<string, string>>({});
+  const [loadingReport, setLoadingReport] = useState<Record<string, boolean>>({});
+  const [tradingActions, setTradingActions] = useState<Record<string, TradingAction[]>>({});
+  const [tradingStats, setTradingStats] = useState<Record<string, TradingStats>>({});
 
   useEffect(() => {
     if (roomId) {
@@ -150,8 +187,25 @@ const Leaderboard: React.FC = () => {
           };
         });
         
-        console.log('Final processed results:', processedResults);
-        setResults(processedResults);
+        // ADDED: Deduplicate by user_id, keeping only the first (highest) result for each user
+        const userIdsSeen = new Set<string>();
+        const deduplicatedResults = processedResults.filter(result => {
+          // If we've seen this user_id before, filter it out
+          if (userIdsSeen.has(result.user_id)) {
+            return false;
+          }
+          // Otherwise, add it to our set and keep it
+          userIdsSeen.add(result.user_id);
+          return true;
+        });
+        
+        // Re-assign ranks after deduplication
+        deduplicatedResults.forEach((result, index) => {
+          result.rank = index + 1;
+        });
+        
+        console.log('Final processed results (deduplicated):', deduplicatedResults);
+        setResults(deduplicatedResults);
       } else {
         // If no results from direct query, try using a stored procedure if available
         console.log('No direct results found, trying alternative approach...');
@@ -185,7 +239,23 @@ const Leaderboard: React.FC = () => {
               }
             }));
             
-            setResults(mappedResults);
+            // Deduplicate by user_id, keeping only the first/best result for each user
+            const userIdsSeen = new Set<string>();
+            const deduplicatedResults = mappedResults.filter((result: GameResult) => {
+              if (userIdsSeen.has(result.user_id)) {
+                return false;
+              }
+              userIdsSeen.add(result.user_id);
+              return true;
+            });
+            
+            // Re-assign ranks after deduplication
+            deduplicatedResults.forEach((result: GameResult, index: number) => {
+              result.rank = index + 1;
+            });
+            
+            console.log('Alternative results (deduplicated):', deduplicatedResults);
+            setResults(deduplicatedResults);
           } else {
             console.log('No results found with either method');
             setResults([]);
@@ -217,7 +287,23 @@ const Leaderboard: React.FC = () => {
                 }
               }));
               
-              setResults(fallbackResults);
+              // Deduplicate the fallback results
+              const fallbackUserIdsSeen = new Set<string>();
+              const deduplicatedFallbackResults = fallbackResults.filter((result: GameResult) => {
+                if (fallbackUserIdsSeen.has(result.user_id)) {
+                  return false;
+                }
+                fallbackUserIdsSeen.add(result.user_id);
+                return true;
+              });
+              
+              // Re-assign ranks after deduplication
+              deduplicatedFallbackResults.forEach((result: GameResult, index: number) => {
+                result.rank = index + 1;
+              });
+              
+              console.log('Fallback results (deduplicated):', deduplicatedFallbackResults);
+              setResults(deduplicatedFallbackResults);
             } else {
               console.log('No data available from any source');
               setResults([]);
@@ -258,6 +344,261 @@ const Leaderboard: React.FC = () => {
       default: return 'text-gray-600';
     }
   };
+
+  // Function to load personality report for a player
+  const loadPersonalityReport = async (result: GameResult) => {
+    try {
+      setLoadingReport(prev => ({ ...prev, [result.id]: true }));
+      
+      // First check if there's already a personality report in the database
+      if (result.game_session?.personality_report) {
+        try {
+          // Try to parse it as a markdown format first
+          const existingReport = result.game_session.personality_report;
+          
+          // If it already has our format, use it directly
+          if (existingReport.includes('Trading Bias Analysis') || 
+              existingReport.includes('Confirmation Bias') || 
+              existingReport.includes('Anchoring')) {
+            
+            setPersonalityReports(prev => ({ ...prev, [result.id]: existingReport }));
+            return existingReport;
+          }
+        } catch (e) {
+          console.error('Error processing existing report:', e);
+        }
+      }
+      
+      // Parse trading history if it exists
+      let tradingActions = [];
+      if (result.game_session?.trading_history) {
+        try {
+          tradingActions = typeof result.game_session.trading_history === 'string' 
+            ? JSON.parse(result.game_session.trading_history)
+            : result.game_session.trading_history;
+        } catch (e) {
+          console.error('Error parsing trading history:', e);
+        }
+      }
+      
+      // If no trading history or empty array, create default analysis
+      if (!tradingActions || tradingActions.length === 0) {
+        const defaultReport = generateDefaultReport(result);
+        setPersonalityReports(prev => ({ ...prev, [result.id]: defaultReport }));
+        return defaultReport;
+      }
+      
+      // Generate the report using GROQ
+      const report = await generatePersonalityReport(tradingActions);
+      
+      // Save it to state
+      setPersonalityReports(prev => ({ ...prev, [result.id]: report }));
+      return report;
+    } catch (error) {
+      console.error('Error generating personality report:', error);
+      // If all else fails, generate a default report
+      const fallbackReport = generateDefaultReport(result);
+      setPersonalityReports(prev => ({ ...prev, [result.id]: fallbackReport }));
+      return fallbackReport;
+    } finally {
+      setLoadingReport(prev => ({ ...prev, [result.id]: false }));
+    }
+  };
+  
+  // Generate a default personality report when data is missing
+  const generateDefaultReport = (result: GameResult): string => {
+    const profit = getProfit(result);
+    const isProfit = profit >= 0;
+    const profitMagnitude = Math.abs(profit);
+    const username = safeUserExtract(result.user).name;
+    
+    // Determine risk profile based on profit/loss
+    let riskProfile = 'moderate';
+    if (profitMagnitude > 15) riskProfile = 'high';
+    else if (profitMagnitude < 5) riskProfile = 'conservative';
+    
+    return `# Trading Bias Analysis
+
+## Confirmation Bias
+${isProfit ? 
+  `${username} appears to have a balanced approach to information gathering. While there's limited trading data, the positive performance suggests an ability to consider multiple viewpoints and avoid echo chambers.` :
+  `${username} may be susceptible to confirmation bias, as indicated by the trading outcome. Without more trading data, it's difficult to determine the extent, but losses might indicate seeking information that confirms existing beliefs.`}
+
+## Anchoring and Adjustment Bias
+${profitMagnitude < 5 ? 
+  `${username} shows signs of moderate anchoring bias. The minimal movement from the starting position suggests a tendency to anchor to initial price points rather than adjusting to new market information.` :
+  `${username} demonstrates flexibility with price anchors, willing to adjust positions based on market conditions rather than anchoring to initial price points.`}
+
+## Framing Bias
+${isProfit ?
+  `${username} appears to maintain consistent decision-making regardless of how information is presented. This resistance to framing effects is a strength in volatile markets.` :
+  `${username} may be influenced by how trading information is framed. The performance suggests decisions might be affected by presentation format rather than fundamental data.`}
+
+## Overconfidence Bias
+${profitMagnitude > 10 ?
+  `${username} displays a ${isProfit ? 'well-calibrated' : 'potential'} overconfidence bias. ${isProfit ? 'The significant gains suggest confidence backed by skill.' : 'The significant losses may indicate excessive risk-taking without appropriate caution.'}` :
+  `${username} shows a balanced confidence level, neither overly cautious nor excessively risk-seeking.`}
+
+## Hindsight Bias
+${username} has limited trading history to analyze for hindsight bias. As trading experience grows, it will be important to maintain awareness that past results don't guarantee future performance, regardless of outcomes.
+
+Note: This is a preliminary analysis based on limited trading data. More active trading will provide deeper insights into trading psychology and decision patterns.`;
+  };
+
+  // Function to get a bias icon
+  const getBiasIcon = (biasType: string) => {
+    switch (biasType.toLowerCase()) {
+      case 'confirmation bias':
+        return <Search size={18} />;
+      case 'anchoring and adjustment bias':
+        return <AnchorIcon size={18} />;
+      case 'framing bias':
+        return <Frame size={18} />;
+      case 'overconfidence bias':
+        return <BadgeAlert size={18} />;
+      case 'hindsight bias':
+        return <Eye size={18} />;
+      default:
+        return <AlertCircle size={18} />;
+    }
+  };
+
+  // Function to get icon for trade action
+  const getActionIcon = (action: string) => {
+    switch (action.toLowerCase()) {
+      case 'buy':
+        return <ArrowUpCircle size={16} className="text-green-500" />;
+      case 'sell':
+        return <ArrowDownCircle size={16} className="text-red-500" />;
+      case 'hold':
+        return <Pause size={16} className="text-yellow-500" />;
+      default:
+        return <AlertCircle size={16} />;
+    }
+  };
+
+  // Parse trading history into actions and stats
+  const parseTradingHistory = (result: GameResult) => {
+    if (!result.game_session?.trading_history || tradingActions[result.id]) {
+      return;
+    }
+
+    try {
+      // Try to parse the trading history
+      let actions: TradingAction[] = [];
+      try {
+        actions = typeof result.game_session.trading_history === 'string'
+          ? JSON.parse(result.game_session.trading_history)
+          : result.game_session.trading_history;
+      } catch (e) {
+        console.error('Error parsing trading history:', e);
+        actions = [];
+      }
+
+      // Store actions in game_action schema if not already stored
+      storeActionsInDatabase(result.id, actions);
+
+      // Calculate statistics
+      const stats: TradingStats = {
+        totalTrades: actions.length,
+        buyOrders: actions.filter(a => a.action === 'buy').length,
+        sellOrders: actions.filter(a => a.action === 'sell').length,
+        holdActions: actions.filter(a => a.action === 'hold').length,
+        levelStats: {}
+      };
+
+      // Calculate per-level statistics
+      const levels = [...new Set(actions.map(a => a.level || 0))].sort((a, b) => a - b);
+      
+      levels.forEach(level => {
+        const levelActions = actions.filter(a => (a.level || 0) === level);
+        stats.levelStats![level] = {
+          totalTrades: levelActions.length,
+          buyOrders: levelActions.filter(a => a.action === 'buy').length,
+          sellOrders: levelActions.filter(a => a.action === 'sell').length,
+          holdActions: levelActions.filter(a => a.action === 'hold').length
+        };
+      });
+
+      // Store in state
+      setTradingActions(prev => ({ ...prev, [result.id]: actions }));
+      setTradingStats(prev => ({ ...prev, [result.id]: stats }));
+    } catch (error) {
+      console.error('Error processing trading actions:', error);
+    }
+  };
+
+  // Function to store trading actions in the database
+  const storeActionsInDatabase = async (resultId: string, actions: TradingAction[]) => {
+    try {
+      // Check if actions are already stored
+      const { data: existingActions } = await supabase
+        .from('game_action')
+        .select('id')
+        .eq('result_id', resultId)
+        .limit(1);
+        
+      if (existingActions && existingActions.length > 0) {
+        console.log('Actions already stored for this result');
+        return;
+      }
+      
+      // Prepare actions for database storage
+      const actionsToStore = actions.map(action => ({
+        result_id: resultId,
+        action_type: action.action,
+        stock_name: action.stock_name,
+        price: action.price,
+        quantity: action.quantity,
+        timestamp: action.timestamp,
+        level: action.level || 0
+      }));
+      
+      // Store in game_action table
+      if (actionsToStore.length > 0) {
+        const { error } = await supabase
+          .from('game_action')
+          .insert(actionsToStore);
+          
+        if (error) {
+          console.error('Error storing actions in database:', error);
+        } else {
+          console.log(`Stored ${actionsToStore.length} actions in database`);
+        }
+      }
+    } catch (error) {
+      console.error('Error in storeActionsInDatabase:', error);
+    }
+  };
+
+  // Function to get a level tag color
+  const getLevelColor = (level: number): string => {
+    const colors = [
+      'bg-blue-600', 'bg-green-600', 'bg-yellow-600', 
+      'bg-purple-600', 'bg-pink-600', 'bg-indigo-600'
+    ];
+    return colors[level % colors.length] || colors[0];
+  };
+
+  // Load personality report when viewing a player's report
+  useEffect(() => {
+    if (showReport) {
+      const result = results.find(r => r.id === showReport);
+      if (result && !personalityReports[result.id]) {
+        loadPersonalityReport(result);
+      }
+    }
+  }, [showReport, results]);
+
+  // Load trading history when viewing a report
+  useEffect(() => {
+    if (showReport) {
+      const result = results.find(r => r.id === showReport);
+      if (result) {
+        parseTradingHistory(result);
+      }
+    }
+  }, [showReport, results]);
 
   if (loading) {
     return (
@@ -413,10 +754,224 @@ const Leaderboard: React.FC = () => {
                       
                       <div className="bg-gray-700 p-4 rounded-lg">
                         <h4 className="text-lg font-semibold text-blue-400 mb-3">Personality Analysis</h4>
-                        <div className="max-h-64 overflow-y-auto">
-                          <p className="text-gray-300 whitespace-pre-wrap">
-                            {result.game_session?.personality_report || 'No personality analysis available for this player.'}
-                          </p>
+                        
+                        {loadingReport[result.id] ? (
+                          <div className="flex items-center justify-center py-6">
+                            <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-500"></div>
+                            <span className="ml-3 text-gray-300">Generating analysis...</span>
+                          </div>
+                        ) : personalityReports[result.id] ? (
+                          <div className="space-y-4 max-h-80 overflow-y-auto">
+                            {personalityReports[result.id].includes('# Trading Bias Analysis') ? (
+                              <>
+                                {/* Handle markdown format from GROQ or local analysis */}
+                                {personalityReports[result.id].split('##').slice(1).map((section, i) => {
+                                  if (!section.trim()) return null;
+                                  
+                                  const title = section.split('\n')[0].trim();
+                                  const content = section.split('\n').slice(1).join('\n').trim();
+                                  
+                                  return (
+                                    <div key={i} className="bg-gray-800 p-3 rounded-md">
+                                      <div className="flex items-center gap-2 mb-2">
+                                        {getBiasIcon(title)}
+                                        <h5 className="font-semibold text-blue-300">{title}</h5>
+                                      </div>
+                                      <p className="text-gray-300 text-sm whitespace-pre-wrap">{content}</p>
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            ) : (
+                              <div className="max-h-64 overflow-y-auto">
+                                {tradingActions[result.id]?.length > 0 ? (
+                                  <div className="space-y-4">
+                                    {/* Group actions by level */}
+                                    {[...new Set(tradingActions[result.id].map(a => a.level || 0))]
+                                      .sort((a, b) => a - b)
+                                      .map(level => (
+                                        <div key={`level-${level}`} className="mb-4">
+                                          <div className="flex items-center gap-2 mb-2">
+                                            <span className={`${getLevelColor(level)} text-white text-xs px-2 py-1 rounded`}>
+                                              Level {level || 1}
+                                            </span>
+                                            <span className="text-sm text-gray-400">
+                                              {tradingStats[result.id]?.levelStats?.[level]?.totalTrades || 0} actions
+                                            </span>
+                                          </div>
+                                          <div className="space-y-2">
+                                            {tradingActions[result.id]
+                                              .filter(action => (action.level || 0) === level)
+                                              .map((action, index) => (
+                                                <div key={index} className="bg-gray-800 p-2 rounded flex items-center justify-between">
+                                                  <div className="flex items-center gap-2">
+                                                    {getActionIcon(action.action)}
+                                                    <span className="font-medium">{action.action.toUpperCase()}</span>
+                                                    <span className="text-gray-400">{action.stock_name}</span>
+                                                  </div>
+                                                  <div className="flex items-center gap-4">
+                                                    <span>{action.quantity} shares</span>
+                                                    <span className="font-semibold">${action.price?.toFixed(2)}</span>
+                                                  </div>
+                                                </div>
+                                              ))
+                                            }
+                                          </div>
+                                        </div>
+                                      ))
+                                    }
+                                  </div>
+                                ) : (
+                                  <div className="text-center py-6 text-gray-400">
+                                    <BarChart className="mx-auto mb-2 opacity-50" size={32} />
+                                    <p>No trading activity recorded</p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-center py-4">
+                            <button 
+                              onClick={() => loadPersonalityReport(result)}
+                              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
+                            >
+                              Generate Personality Analysis
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      
+                      {/* Trading Activity Section */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
+                        <div className="bg-gray-700 p-4 rounded-lg">
+                          <h4 className="text-lg font-semibold text-blue-400 mb-3">Trading Activity</h4>
+                          <div className="max-h-64 overflow-y-auto">
+                            {tradingActions[result.id]?.length > 0 ? (
+                              <div className="space-y-4">
+                                {/* Group actions by level */}
+                                {[...new Set(tradingActions[result.id].map(a => a.level || 0))]
+                                  .sort((a, b) => a - b)
+                                  .map(level => (
+                                    <div key={`level-${level}`} className="mb-4">
+                                      <div className="flex items-center gap-2 mb-2">
+                                        <span className={`${getLevelColor(level)} text-white text-xs px-2 py-1 rounded`}>
+                                          Level {level || 1}
+                                        </span>
+                                        <span className="text-sm text-gray-400">
+                                          {tradingStats[result.id]?.levelStats?.[level]?.totalTrades || 0} actions
+                                        </span>
+                                      </div>
+                                      <div className="space-y-2">
+                                        {tradingActions[result.id]
+                                          .filter(action => (action.level || 0) === level)
+                                          .map((action, index) => (
+                                            <div key={index} className="bg-gray-800 p-2 rounded flex items-center justify-between">
+                                              <div className="flex items-center gap-2">
+                                                {getActionIcon(action.action)}
+                                                <span className="font-medium">{action.action.toUpperCase()}</span>
+                                                <span className="text-gray-400">{action.stock_name}</span>
+                                              </div>
+                                              <div className="flex items-center gap-4">
+                                                <span>{action.quantity} shares</span>
+                                                <span className="font-semibold">${action.price?.toFixed(2)}</span>
+                                              </div>
+                                            </div>
+                                          ))
+                                        }
+                                      </div>
+                                    </div>
+                                  ))
+                                }
+                              </div>
+                            ) : (
+                              <div className="text-center py-6 text-gray-400">
+                                <BarChart className="mx-auto mb-2 opacity-50" size={32} />
+                                <p>No trading activity recorded</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        
+                        <div className="bg-gray-700 p-4 rounded-lg">
+                          <h4 className="text-lg font-semibold text-blue-400 mb-3">Action Distribution</h4>
+                          <div className="h-64 flex items-center justify-center">
+                            {tradingStats[result.id]?.totalTrades > 0 ? (
+                              <div className="w-full h-full">
+                                <div className="flex items-end justify-around pb-4 h-3/4">
+                                  {tradingStats[result.id].buyOrders > 0 && (
+                                    <div className="flex flex-col items-center">
+                                      <div className="bg-green-500 w-12" style={{ 
+                                        height: `${(tradingStats[result.id].buyOrders / tradingStats[result.id].totalTrades) * 100}%` 
+                                      }}></div>
+                                      <span className="mt-2">Buy</span>
+                                    </div>
+                                  )}
+                                  {tradingStats[result.id].sellOrders > 0 && (
+                                    <div className="flex flex-col items-center">
+                                      <div className="bg-red-500 w-12" style={{ 
+                                        height: `${(tradingStats[result.id].sellOrders / tradingStats[result.id].totalTrades) * 100}%` 
+                                      }}></div>
+                                      <span className="mt-2">Sell</span>
+                                    </div>
+                                  )}
+                                  {tradingStats[result.id].holdActions > 0 && (
+                                    <div className="flex flex-col items-center">
+                                      <div className="bg-yellow-500 w-12" style={{ 
+                                        height: `${(tradingStats[result.id].holdActions / tradingStats[result.id].totalTrades) * 100}%` 
+                                      }}></div>
+                                      <span className="mt-2">Hold</span>
+                                    </div>
+                                  )}
+                                </div>
+                                
+                                {/* Level breakdown */}
+                                <div className="mt-4">
+                                  <h5 className="text-sm text-gray-400 mb-2">Actions per level:</h5>
+                                  <div className="flex gap-2 flex-wrap">
+                                    {tradingStats[result.id]?.levelStats && 
+                                      Object.entries(tradingStats[result.id].levelStats || {})
+                                        .sort(([a], [b]) => Number(a) - Number(b))
+                                        .map(([level, stats]) => (
+                                          <div key={`level-stats-${level}`} 
+                                               className={`${getLevelColor(Number(level))} px-2 py-1 rounded text-xs flex items-center gap-1`}>
+                                            <span>L{level}:</span>
+                                            <span>{stats.totalTrades}</span>
+                                          </div>
+                                        ))
+                                    }
+                                  </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="text-center text-gray-400">
+                                <BarChart className="mx-auto mb-2 opacity-50" size={32} />
+                                <p>No action data available</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="bg-gray-700 p-4 rounded-lg mt-6">
+                        <h4 className="text-lg font-semibold text-blue-400 mb-3">Trading Statistics</h4>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                          <div className="bg-gray-800 p-4 rounded-lg">
+                            <h5 className="text-gray-400 mb-2">Total Trades</h5>
+                            <p className="text-4xl font-bold">{tradingStats[result.id]?.totalTrades || 0}</p>
+                          </div>
+                          <div className="bg-gray-800 p-4 rounded-lg">
+                            <h5 className="text-gray-400 mb-2">Buy Orders</h5>
+                            <p className="text-4xl font-bold text-green-500">{tradingStats[result.id]?.buyOrders || 0}</p>
+                          </div>
+                          <div className="bg-gray-800 p-4 rounded-lg">
+                            <h5 className="text-gray-400 mb-2">Sell Orders</h5>
+                            <p className="text-4xl font-bold text-red-500">{tradingStats[result.id]?.sellOrders || 0}</p>
+                          </div>
+                          <div className="bg-gray-800 p-4 rounded-lg">
+                            <h5 className="text-gray-400 mb-2">Hold Actions</h5>
+                            <p className="text-4xl font-bold text-yellow-500">{tradingStats[result.id]?.holdActions || 0}</p>
+                          </div>
                         </div>
                       </div>
                     </div>
