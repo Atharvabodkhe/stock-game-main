@@ -47,6 +47,18 @@ interface TradingAction {
   level?: number;
 }
 
+interface LevelActionData {
+  level: number;
+  totalTrades: number;
+  buyOrders: number;
+  sellOrders: number;
+  holdActions: number;
+  avgBuyPrice: number;
+  avgSellPrice: number;
+  totalBuyQuantity: number;
+  totalSellQuantity: number;
+}
+
 interface TradingStats {
   totalTrades: number;
   buyOrders: number;
@@ -78,6 +90,7 @@ const Leaderboard: React.FC = () => {
   const [loadingReport, setLoadingReport] = useState<Record<string, boolean>>({});
   const [tradingActions, setTradingActions] = useState<Record<string, TradingAction[]>>({});
   const [tradingStats, setTradingStats] = useState<Record<string, TradingStats>>({});
+  const [levelActions, setLevelActions] = useState<Record<string, LevelActionData[]>>({});
 
   useEffect(() => {
     if (roomId) {
@@ -477,6 +490,45 @@ Note: This is a preliminary analysis based on limited trading data. More active 
     }
   };
 
+  // New function to fetch level-wise action data
+  const fetchLevelActionData = async (resultId: string) => {
+    try {
+      console.log('Fetching level action data for result:', resultId);
+      
+      // First check if we already have the data
+      if (levelActions[resultId]) {
+        console.log('Using cached level action data');
+        return levelActions[resultId];
+      }
+      
+      // Try to fetch from the new function
+      const { data, error } = await supabase.rpc(
+        'get_level_actions_json',
+        { result_id_param: resultId }
+      );
+      
+      if (error) {
+        console.error('Error fetching level action data:', error);
+        return null;
+      }
+      
+      if (data && Array.isArray(data)) {
+        console.log('Received level action data:', data);
+        
+        // Store in state
+        setLevelActions(prev => ({ ...prev, [resultId]: data }));
+        return data;
+      } else {
+        // If the RPC call returns empty or invalid data, handle appropriately
+        console.log('No level action data found or invalid format');
+        return null;
+      }
+    } catch (error) {
+      console.error('Error in fetchLevelActionData:', error);
+      return null;
+    }
+  };
+
   // Parse trading history into actions and stats
   const parseTradingHistory = (result: GameResult) => {
     if (!result.game_session?.trading_history || tradingActions[result.id]) {
@@ -497,6 +549,17 @@ Note: This is a preliminary analysis based on limited trading data. More active 
 
       // Store actions in game_action schema if not already stored
       storeActionsInDatabase(result.id, actions);
+
+      // Try to fetch level-wise action data from our new table
+      fetchLevelActionData(result.id).then(levelData => {
+        if (levelData) {
+          console.log('Using server-side aggregated level data');
+          // We could use this data directly instead of calculating it client-side
+        } else {
+          console.log('Falling back to client-side calculation');
+          // Continue with existing client-side calculation
+        }
+      });
 
       // Calculate statistics
       const stats: TradingStats = {
@@ -590,12 +653,13 @@ Note: This is a preliminary analysis based on limited trading data. More active 
     }
   }, [showReport, results]);
 
-  // Load trading history when viewing a report
+  // Load both trading history and level data when viewing a report
   useEffect(() => {
     if (showReport) {
       const result = results.find(r => r.id === showReport);
       if (result) {
         parseTradingHistory(result);
+        fetchLevelActionData(result.id);
       }
     }
   }, [showReport, results]);
@@ -953,6 +1017,7 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                         </div>
                       </div>
                       
+                      {/* Trading Statistics */}
                       <div className="bg-gray-700 p-4 rounded-lg mt-6">
                         <h4 className="text-lg font-semibold text-blue-400 mb-3">Trading Statistics</h4>
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
@@ -973,6 +1038,68 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                             <p className="text-4xl font-bold text-yellow-500">{tradingStats[result.id]?.holdActions || 0}</p>
                           </div>
                         </div>
+                        
+                        {/* Add advanced level statistics section */}
+                        {levelActions[result.id] && levelActions[result.id].length > 0 && (
+                          <div className="mt-6">
+                            <h5 className="text-lg font-semibold text-blue-300 mb-3">Advanced Level Statistics</h5>
+                            <div className="bg-gray-800 p-4 rounded-lg">
+                              <div className="overflow-x-auto">
+                                <table className="w-full text-left">
+                                  <thead>
+                                    <tr className="border-b border-gray-700">
+                                      <th className="py-2 px-3">Level</th>
+                                      <th className="py-2 px-3">Total</th>
+                                      <th className="py-2 px-3">Buy</th>
+                                      <th className="py-2 px-3">Sell</th>
+                                      <th className="py-2 px-3">Hold</th>
+                                      <th className="py-2 px-3">Avg Buy Price</th>
+                                      <th className="py-2 px-3">Avg Sell Price</th>
+                                      <th className="py-2 px-3">Buy Quantity</th>
+                                      <th className="py-2 px-3">Sell Quantity</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {levelActions[result.id].map((levelData) => (
+                                      <tr key={`level-${levelData.level}`} className="border-b border-gray-700">
+                                        <td className="py-2 px-3">
+                                          <span className={`${getLevelColor(levelData.level)} text-white text-xs px-2 py-1 rounded`}>
+                                            Level {levelData.level}
+                                          </span>
+                                        </td>
+                                        <td className="py-2 px-3">{levelData.totalTrades}</td>
+                                        <td className="py-2 px-3 text-green-500">{levelData.buyOrders}</td>
+                                        <td className="py-2 px-3 text-red-500">{levelData.sellOrders}</td>
+                                        <td className="py-2 px-3 text-yellow-500">{levelData.holdActions}</td>
+                                        <td className="py-2 px-3">${levelData.avgBuyPrice?.toFixed(2) || '0.00'}</td>
+                                        <td className="py-2 px-3">${levelData.avgSellPrice?.toFixed(2) || '0.00'}</td>
+                                        <td className="py-2 px-3">{levelData.totalBuyQuantity}</td>
+                                        <td className="py-2 px-3">{levelData.totalSellQuantity}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                            
+                            {/* Level-based trading performance chart */}
+                            <div className="mt-4 bg-gray-800 p-4 rounded-lg">
+                              <h5 className="text-gray-400 mb-3">Level-based Trading Intensity</h5>
+                              <div className="h-40 flex items-end justify-around">
+                                {levelActions[result.id].map((levelData) => (
+                                  <div key={`bar-${levelData.level}`} className="flex flex-col items-center">
+                                    <div 
+                                      className={`${getLevelColor(levelData.level)} w-12`}
+                                      style={{ height: `${Math.min(100, (levelData.totalTrades / Math.max(...levelActions[result.id].map(d => d.totalTrades))) * 100)}%` }}
+                                    ></div>
+                                    <span className="mt-2 text-xs">Level {levelData.level}</span>
+                                    <span className="text-xs text-gray-400">{levelData.totalTrades}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   )}
