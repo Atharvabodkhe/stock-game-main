@@ -83,7 +83,7 @@ const StockControl: React.FC<StockControlProps> = ({
                   <span className={`text-lg font-bold ${
                     change > 0 ? 'text-green-500' : change < 0 ? 'text-red-500' : 'text-white'
                   }`}>
-                    ${stock.price.toFixed(2)}
+                    ₹{stock.price.toFixed(2)}
                   </span>
                   {change > 0 ? (
                     <TrendingUp className="text-green-500" size={20} />

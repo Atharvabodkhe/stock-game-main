@@ -39,7 +39,7 @@ const GameResults: React.FC<GameResultsProps> = ({
               <div className="flex items-center gap-4">
                 <div>
                   <div className="text-green-500 font-bold">
-                    ${result.final_balance.toFixed(2)}
+                    ₹{result.final_balance.toFixed(2)}
                   </div>
                   <div className={`text-xs ${getProfit(result) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                     {getProfit(result) >= 0 ? '+' : ''}{getProfit(result).toFixed(2)}%
@@ -69,7 +69,7 @@ const GameResults: React.FC<GameResultsProps> = ({
                   <h5 className="text-sm font-medium text-blue-400 mb-1">Performance Summary</h5>
                   <div className="flex items-center gap-2 mb-2">
                     <Trophy size={16} className={getProfit(result) >= 0 ? 'text-green-500' : 'text-red-500'} />
-                    <span className="text-white">Final Balance: <span className="font-bold">${result.final_balance.toFixed(2)}</span></span>
+                    <span className="text-white">Final Balance: <span className="font-bold">₹{result.final_balance.toFixed(2)}</span></span>
                     <span className={`text-sm ${getProfit(result) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                       ({getProfit(result) >= 0 ? '+' : ''}{getProfit(result).toFixed(2)}%)
                     </span>

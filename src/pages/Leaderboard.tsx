@@ -186,7 +186,7 @@ const Leaderboard: React.FC = () => {
           return {
             id: result.id,
             user_id: result.user_id,
-            final_balance: result.final_balance,
+            final_balance: Number(result.final_balance),
             rank: index + 1,
             profit_percentage: profit,
             user: {
@@ -239,9 +239,9 @@ const Leaderboard: React.FC = () => {
             const mappedResults = altData.map((item: any, index: number) => ({
               id: item.id || `result-${index}`,
               user_id: item.user_id || '',
-              final_balance: item.final_balance || 10000,
+              final_balance: Number(item.final_balance) || 10000,
               rank: index + 1,
-              profit_percentage: item.final_balance ? ((item.final_balance - 10000) / 10000) * 100 : 0,
+              profit_percentage: item.final_balance ? ((Number(item.final_balance) - 10000) / 10000) * 100 : 0,
               user: {
                 name: item.user_name || `User-${(item.user_id || '').substring(0, 8)}`,
                 email: item.user_email || ''
@@ -290,9 +290,9 @@ const Leaderboard: React.FC = () => {
               const fallbackResults = sessionData.map((session: any, index: number) => ({
                 id: session.id,
                 user_id: session.user_id,
-                final_balance: session.final_balance || 10000,
+                final_balance: Number(session.final_balance) || 10000,
                 rank: index + 1,
-                profit_percentage: ((session.final_balance || 10000) - 10000) / 10000 * 100,
+                profit_percentage: ((Number(session.final_balance) || 10000) - 10000) / 10000 * 100,
                 user: { name: `User-${session.user_id.substring(0, 8)}`, email: '' },
                 game_session: { 
                   personality_report: session.personality_report,
@@ -483,8 +483,6 @@ Note: This is a preliminary analysis based on limited trading data. More active 
         return <ArrowUpCircle size={16} className="text-green-500" />;
       case 'sell':
         return <ArrowDownCircle size={16} className="text-red-500" />;
-      case 'hold':
-        return <Pause size={16} className="text-yellow-500" />;
       default:
         return <AlertCircle size={16} />;
     }
@@ -732,7 +730,7 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                     <div className="flex items-center gap-4">
                       <div className="text-right">
                         <div className="text-lg font-bold">
-                          ${result.final_balance.toFixed(2)}
+                          ₹{result.final_balance.toFixed(2)}
                         </div>
                         <div className="flex items-center gap-1">
                           {getProfit(result) >= 0 ? (
@@ -741,7 +739,8 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                             <TrendingDown size={16} className="text-red-500" />
                           )}
                           <span className={`${getProfit(result) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            {getProfit(result) >= 0 ? '+' : ''}{getProfit(result).toFixed(2)}%
+                            {getProfit(result) >= 0 ? '+' : ''}₹{(result.final_balance - 10000).toFixed(2)} 
+                            ({getProfit(result) >= 0 ? '+' : ''}{getProfit(result).toFixed(2)}%)
                           </span>
                         </div>
                       </div>
@@ -773,16 +772,16 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                           <div className="space-y-2">
                             <div className="flex justify-between">
                               <span>Final Balance:</span>
-                              <span className="font-bold">${result.final_balance.toFixed(2)}</span>
+                              <span className="font-bold">₹{result.final_balance.toFixed(2)}</span>
                             </div>
                             <div className="flex justify-between">
                               <span>Starting Balance:</span>
-                              <span>$10,000.00</span>
+                              <span>₹10,000.00</span>
                             </div>
                             <div className="flex justify-between border-t border-gray-600 pt-2 mt-2">
                               <span>Profit/Loss:</span>
                               <span className={`font-bold ${getProfit(result) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                                {getProfit(result) >= 0 ? '+' : ''}${(result.final_balance - 10000).toFixed(2)} 
+                                {getProfit(result) >= 0 ? '+' : ''}₹{(result.final_balance - 10000).toFixed(2)} 
                                 ({getProfit(result) >= 0 ? '+' : ''}{getProfit(result).toFixed(2)}%)
                               </span>
                             </div>
@@ -875,7 +874,7 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                                                   </div>
                                                   <div className="flex items-center gap-4">
                                                     <span>{action.quantity} shares</span>
-                                                    <span className="font-semibold">${action.price?.toFixed(2)}</span>
+                                                    <span className="font-semibold">₹{action.price?.toFixed(2)}</span>
                                                   </div>
                                                 </div>
                                               ))
@@ -938,7 +937,7 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                                               </div>
                                               <div className="flex items-center gap-4">
                                                 <span>{action.quantity} shares</span>
-                                                <span className="font-semibold">${action.price?.toFixed(2)}</span>
+                                                <span className="font-semibold">₹{action.price?.toFixed(2)}</span>
                                               </div>
                                             </div>
                                           ))
@@ -977,14 +976,6 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                                         height: `${(tradingStats[result.id].sellOrders / tradingStats[result.id].totalTrades) * 100}%` 
                                       }}></div>
                                       <span className="mt-2">Sell</span>
-                                    </div>
-                                  )}
-                                  {tradingStats[result.id].holdActions > 0 && (
-                                    <div className="flex flex-col items-center">
-                                      <div className="bg-yellow-500 w-12" style={{ 
-                                        height: `${(tradingStats[result.id].holdActions / tradingStats[result.id].totalTrades) * 100}%` 
-                                      }}></div>
-                                      <span className="mt-2">Hold</span>
                                     </div>
                                   )}
                                 </div>
@@ -1033,10 +1024,6 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                             <h5 className="text-gray-400 mb-2">Sell Orders</h5>
                             <p className="text-4xl font-bold text-red-500">{tradingStats[result.id]?.sellOrders || 0}</p>
                           </div>
-                          <div className="bg-gray-800 p-4 rounded-lg">
-                            <h5 className="text-gray-400 mb-2">Hold Actions</h5>
-                            <p className="text-4xl font-bold text-yellow-500">{tradingStats[result.id]?.holdActions || 0}</p>
-                          </div>
                         </div>
                         
                         {/* Add advanced level statistics section */}
@@ -1052,7 +1039,6 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                                       <th className="py-2 px-3">Total</th>
                                       <th className="py-2 px-3">Buy</th>
                                       <th className="py-2 px-3">Sell</th>
-                                      <th className="py-2 px-3">Hold</th>
                                       <th className="py-2 px-3">Avg Buy Price</th>
                                       <th className="py-2 px-3">Avg Sell Price</th>
                                       <th className="py-2 px-3">Buy Quantity</th>
@@ -1070,9 +1056,8 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                                         <td className="py-2 px-3">{levelData.totalTrades}</td>
                                         <td className="py-2 px-3 text-green-500">{levelData.buyOrders}</td>
                                         <td className="py-2 px-3 text-red-500">{levelData.sellOrders}</td>
-                                        <td className="py-2 px-3 text-yellow-500">{levelData.holdActions}</td>
-                                        <td className="py-2 px-3">${levelData.avgBuyPrice?.toFixed(2) || '0.00'}</td>
-                                        <td className="py-2 px-3">${levelData.avgSellPrice?.toFixed(2) || '0.00'}</td>
+                                        <td className="py-2 px-3">₹{levelData.avgBuyPrice?.toFixed(2) || '0.00'}</td>
+                                        <td className="py-2 px-3">₹{levelData.avgSellPrice?.toFixed(2) || '0.00'}</td>
                                         <td className="py-2 px-3">{levelData.totalBuyQuantity}</td>
                                         <td className="py-2 px-3">{levelData.totalSellQuantity}</td>
                                       </tr>

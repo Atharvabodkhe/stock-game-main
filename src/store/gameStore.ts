@@ -75,9 +75,12 @@ interface StockHolding {
 
 // Default initial values to use if database fetch fails
 const initialStocks = [
-  { name: 'TECH Corp', price: 100, previousPrice: 100, history: [100] },
-  { name: 'GREEN Energy', price: 75, previousPrice: 75, history: [75] },
-  { name: 'HEALTH Plus', price: 50, previousPrice: 50, history: [50] },
+  { name: 'Reliance Industries', price: 2500, previousPrice: 2500, history: [2500] },
+  { name: 'Tata Motors', price: 600, previousPrice: 600, history: [600] },
+  { name: 'HDFC Bank', price: 1500, previousPrice: 1500, history: [1500] },
+  { name: 'Infosys', price: 1400, previousPrice: 1400, history: [1400] },
+  { name: 'Adani Enterprises', price: 2000, previousPrice: 2000, history: [2000] },
+  { name: 'Zomato', price: 100, previousPrice: 100, history: [100] },
 ];
 
 const initialStockPerformance = initialStocks.map(stock => ({
@@ -95,16 +98,16 @@ const initialLevelStocks = Array.from({ length: 10 }, (_, i) => ({
 }));
 
 const initialNews = [
-  'Breaking: TECH Corp announces revolutionary quantum computing breakthrough, market anticipates major shift',
-  'GREEN Energy secures massive government contract for renewable infrastructure',
-  'HEALTH Plus releases promising clinical trial results for new treatment',
-  'Market volatility increases as global economic tensions rise',
-  'Tech sector faces regulatory challenges in key markets',
-  'Renewable energy sector receives major investment boost',
-  'Healthcare companies see surge in demand for innovative solutions',
-  'Market analysts predict significant shifts in tech valuations',
-  'Energy sector transformation accelerates amid policy changes',
-  'Healthcare innovation drives market optimism in final trading session',
+  'Breaking: Reliance Industries announces major expansion in renewable energy division, market anticipates significant growth',
+  'Tata Motors unveils new electric vehicle lineup, stock surges on positive investor sentiment',
+  'HDFC Bank reports record quarterly profit, exceeding analyst expectations',
+  'Infosys secures multi-million dollar IT infrastructure deal with global financial institutions',
+  'Adani Enterprises diversifies portfolio with strategic acquisitions in emerging sectors',
+  'Zomato expands quick commerce service to additional cities, boosting market share',
+  'Indian stock market reaches all-time high as foreign investors increase their positions',
+  'Technology sector leads gains as digital transformation accelerates across industries',
+  'Banking stocks rally on positive economic outlook and credit growth projections',
+  'Market closes strong in final session with broad-based buying across sectors',
 ];
 
 export const useGameStore = create<GameState>((set, get) => ({
