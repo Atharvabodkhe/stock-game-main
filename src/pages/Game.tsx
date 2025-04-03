@@ -2,7 +2,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useGameStore } from '../store/gameStore';
 import { generatePersonalityReport } from '../lib/groq';
-import { TrendingUp, TrendingDown, Minus, RotateCcw, Timer, DollarSign, AlertTriangle, LogOut } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, RotateCcw, Timer, DollarSign, AlertTriangle, LogOut, Bell } from 'lucide-react';
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { LineChart, Line, Tooltip, ResponsiveContainer } from 'recharts';
 
@@ -33,7 +33,7 @@ const PauseOverlay = () => (
 function Game() {
   const navigate = useNavigate();
   const location = useLocation();
-  const [timeLeft, setTimeLeft] = useState(60);
+  const [timeLeft, setTimeLeft] = useState(120);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -52,6 +52,11 @@ function Game() {
   const [completionProcessStarted, setCompletionProcessStarted] = useState(false);
   
   const [recentUpdates, setRecentUpdates] = useState<{[key: string]: boolean}>({});
+  
+  // Add new state for news events
+  const [showNewsAlert, setShowNewsAlert] = useState(false);
+  const [newsAlertContent, setNewsAlertContent] = useState('');
+  const newsAlertTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const {
     currentLevel,
@@ -66,6 +71,10 @@ function Game() {
     isPaused,
     pausedAt,
     playerHoldings,
+    // Add new values from gameStore
+    timerSeconds,
+    levelNewsEvents,
+    latestNewsEvent,
     updateStocks,
     addAction,
     updateBalance,
@@ -78,7 +87,11 @@ function Game() {
     buyStock,
     sellStock,
     getStockAvgPrice,
-    getStockQuantity
+    getStockQuantity,
+    // Add new functions
+    incrementTimer,
+    resetTimer,
+    processTimedEvents,
   } = useGameStore();
 
   const [stockQuantities, setStockQuantities] = useState<{[key: string]: number}>({});
@@ -148,7 +161,7 @@ function Game() {
     setLevelAdvanceLock(true);
     lastLevelAdvanceTime.current = now;
     
-    setTimeLeft(60);
+    setTimeLeft(120);
     
     console.log(`Advancing to next level: ${currentLevel + 1} (will display as Level ${currentLevel + 2})`);
     nextLevel();
@@ -477,24 +490,58 @@ function Game() {
     };
   }, [gameCompleted, loading, setLoadingWithDebounce, personalityReport]);
 
+  // Add event listener for news updates
+  useEffect(() => {
+    const handleNewsEvent = (event: CustomEvent) => {
+      const { content } = event.detail;
+      
+      // Show news alert
+      setNewsAlertContent(content);
+      setShowNewsAlert(true);
+      
+      // Clear any existing timeout
+      if (newsAlertTimeoutRef.current) {
+        clearTimeout(newsAlertTimeoutRef.current);
+      }
+      
+      // Hide news alert after 5 seconds
+      newsAlertTimeoutRef.current = setTimeout(() => {
+        setShowNewsAlert(false);
+      }, 5000);
+    };
+    
+    // Add event listener
+    window.addEventListener('news-event-triggered', handleNewsEvent as EventListener);
+    
+    // Clean up
+    return () => {
+      window.removeEventListener('news-event-triggered', handleNewsEvent as EventListener);
+      if (newsAlertTimeoutRef.current) {
+        clearTimeout(newsAlertTimeoutRef.current);
+      }
+    };
+  }, []);
+  
+  // Replace the existing timer logic with our new timer for news events
   useEffect(() => {
     let timer: NodeJS.Timeout;
     
-    if (!gameCompleted && !levelAdvanceLock && !loading) {
+    if (!gameCompleted && !isPaused && !levelAdvanceLock && !loading) {
       timer = setInterval(() => {
+        // Decrement the level timer
         setTimeLeft((prev) => {
+          // Change from 61 to 1 to allow timer to run full 120 seconds
           if (prev <= 1) {
             if (!levelAdvanceLock && currentLevel < 9) {
               handleNextLevel();
             }
-            return 60;
+            return 120;
           }
           return prev - 1;
         });
 
-        if (autoUpdateEnabled) {
-          updateStocks();
-        }
+        // Increment our news events timer
+        incrementTimer();
       }, 1000);
     }
 
@@ -503,7 +550,12 @@ function Game() {
         clearInterval(timer);
       }
     };
-  }, [gameCompleted, autoUpdateEnabled, updateStocks, handleNextLevel, levelAdvanceLock, loading, currentLevel]);
+  }, [gameCompleted, isPaused, levelAdvanceLock, loading, incrementTimer, currentLevel, handleNextLevel]);
+  
+  // Reset timer when level changes
+  useEffect(() => {
+    resetTimer();
+  }, [currentLevel, resetTimer]);
 
   const validateStockQuantity = (stockName: string, quantity: number) => {
     const stock = gameStocks.find(s => s.name === stockName);
@@ -559,6 +611,7 @@ function Game() {
         avg_price: getStockAvgPrice(stockName),
         owned_quantity: getStockQuantity(stockName),
         timestamp: new Date().toISOString(),
+        action_time_seconds: timerSeconds, // Include the timer seconds in action data
       };
       
       addAction(actionData);
@@ -576,7 +629,8 @@ function Game() {
           action_type: action,
           price: transactionPrice,
           quantity: quantity,
-          level: currentLevel
+          level: currentLevel,
+          action_time_seconds: timerSeconds // Log timer seconds value
         });
         
         // Track if an action has been successfully saved to avoid duplicates
@@ -592,7 +646,8 @@ function Game() {
             p_stock: stockName,
             p_action: action,
             p_price: transactionPrice,
-            p_level: currentLevel + 1
+            p_level: currentLevel + 1,
+            p_action_time_seconds: timerSeconds // Include timer seconds in emergency insert
           });
           
           if (emergencyError) {
@@ -722,8 +777,8 @@ function Game() {
         if (!actionSaved) {
           // METHOD 1: Try using safe_insert_game_action RPC function
           try {
-            console.log('Saving action using safe_insert_game_action function...');
-            const { data: safeResult, error: safeError } = await supabase.rpc('safe_insert_game_action', {
+            console.log('Attempting safe_insert_game_action...');
+            const { data: safeInsertResult, error: safeInsertError } = await supabase.rpc('safe_insert_game_action', {
               p_session_id: sessionId,
               p_room_id: roomId,
               p_user_id: user?.id,
@@ -731,17 +786,103 @@ function Game() {
               p_action_type: action,
               p_price: transactionPrice,
               p_quantity: quantity,
-              p_level: currentLevel + 1
+              p_level: currentLevel + 1,
+              p_action_time_seconds: timerSeconds // Include timer seconds in safe insert
             });
             
-            if (safeError) {
-              console.error('Error using safe_insert_game_action:', safeError);
-            } else if (safeResult) {
-              console.log('Successfully saved action using safe_insert_game_action');
-              actionSaved = true;
+            if (safeInsertError) {
+              console.error('Error with safe_insert_game_action:', safeInsertError);
+              
+              // Fall back to SQL approach
+              console.log('Attempting direct SQL approach...');
+              const { data: sqlResult, error: sqlError } = await supabase.rpc('exec_sql', {
+                sql: `
+                  INSERT INTO public.game_action (
+                    id, 
+                    session_id, 
+                    room_id,
+                    user_id,
+                    stock_name, 
+                    action_type,
+                    price,
+                    quantity,
+                    level,
+                    timestamp,
+                    action_time_seconds
+                  ) VALUES (
+                    gen_random_uuid(),
+                    '${sessionId}',
+                    ${roomId ? `'${roomId}'` : 'NULL'},
+                    ${user?.id ? `'${user.id}'` : 'NULL'},
+                    '${stockName.replace(/'/g, "''")}',
+                    '${action.replace(/'/g, "''")}',
+                    ${transactionPrice},
+                    ${quantity},
+                    ${currentLevel + 1},
+                    NOW(),
+                    ${timerSeconds}
+                  );
+                `
+              });
+            
+            if (sqlError) {
+              console.error('Error with guaranteed SQL insert:', sqlError);
+              
+              // If that fails, try creating a minimal version of the table if it doesn't exist
+              const createTableQuery = `
+                CREATE TABLE IF NOT EXISTS public.game_action (
+                  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  session_id UUID,
+                  user_id UUID,
+                  stock_name TEXT,
+                  action_type TEXT,
+                  price NUMERIC,
+                  quantity INTEGER DEFAULT 1,
+                  level INTEGER,
+                  timestamp TIMESTAMPTZ DEFAULT now(),
+                  action_time_seconds INTEGER
+                );
+                
+                INSERT INTO public.game_action (
+                  id, 
+                  session_id, 
+                  stock_name, 
+                  action_type,
+                  price,
+                  level,
+                  action_time_seconds
+                ) VALUES (
+                  gen_random_uuid(),
+                  '${sessionId}',
+                  '${stockName.replace(/'/g, "''")}',
+                  '${action.replace(/'/g, "''")}',
+                  ${transactionPrice},
+                  ${currentLevel + 1},
+                  ${timerSeconds}
+                );
+              `;
+              
+              // Try to create the table and insert
+              const { error: createError } = await supabase.rpc('exec_sql', { 
+                sql: createTableQuery 
+              });
+              
+              if (createError) {
+                console.error('Error creating game_action table and inserting:', createError);
+              } else {
+                console.log('Successfully created game_action table and inserted record');
+                actionSaved = true; // Mark as saved to prevent duplicates
+              }
+            } else {
+              console.log('Guaranteed SQL insert successful');
+              actionSaved = true; // Mark as saved to prevent duplicates
             }
-          } catch (safeErr) {
-            console.error('Exception calling safe_insert_game_action:', safeErr);
+          } else {
+            console.log('Safe insert successful:', safeInsertResult);
+            actionSaved = true; // Mark as saved to prevent duplicates
+          }
+        } catch (safeInsertErr) {
+          console.error('Error with safe insert:', safeInsertErr);
           }
         }
         
@@ -758,7 +899,8 @@ function Game() {
             p_price: transactionPrice,
             p_quantity: quantity,
             p_level: currentLevel + 1,
-            p_timestamp: new Date().toISOString()
+            p_timestamp: new Date().toISOString(),
+            p_action_time_seconds: timerSeconds
           });
           
           if (rpcError) {
@@ -788,7 +930,8 @@ function Game() {
               price: transactionPrice,
               quantity: quantity,
               level: currentLevel + 1,
-              timestamp: new Date().toISOString()
+              timestamp: new Date().toISOString(),
+              action_time_seconds: timerSeconds
             }
           ]);
           
@@ -812,7 +955,8 @@ function Game() {
               p_stock_name: stockName,
               p_action_type: action,
               p_price: transactionPrice,
-              p_level: currentLevel + 1
+              p_level: currentLevel + 1,
+              p_action_time_seconds: timerSeconds
             });
             
             if (simplifiedError) {
@@ -872,6 +1016,7 @@ function Game() {
               quantity: quantity,
               level: currentLevel + 1, // Store the displayed level (1-based) not the index (0-based)
               timestamp: new Date().toISOString(),
+              action_time_seconds: timerSeconds, // Include timer seconds in backup
               backed_up: true
             });
             localStorage.setItem('game_action_backup', JSON.stringify(backupActions));
@@ -1704,7 +1849,8 @@ function Game() {
                   quantity: action.quantity || 1,
                   level: actionLevel,
                   timestamp: action.timestamp,
-                  room_id: soloRoomId
+                  room_id: soloRoomId,
+                  action_time_seconds: action.action_time_seconds // Include action time seconds
                 };
               });
               
@@ -2261,26 +2407,6 @@ function Game() {
   }, [shouldShowCompletionScreen, balance, updateBalance, sessionId, supabase, roomId]);
 
   useEffect(() => {
-    let timer: NodeJS.Timeout | null = null;
-    
-    if (!isPaused && !gameCompleted && timeLeft > 0) {
-      timer = setInterval(() => {
-        setTimeLeft(prev => {
-          if (prev <= 1) {
-            if (timer) clearInterval(timer);
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-    }
-    
-    return () => {
-      if (timer) clearInterval(timer);
-    };
-  }, [timeLeft, isPaused, gameCompleted]);
-
-  useEffect(() => {
     fetchInitialData();
     setupRealtimeSubscriptions();
     
@@ -2613,6 +2739,23 @@ function Game() {
     };
   }, [sessionId, supabase]);
 
+  // Add NewsAlert Component
+  const NewsAlert = () => {
+    if (!showNewsAlert) return null;
+    
+    return (
+      <div className="fixed top-24 right-4 bg-blue-900 text-white px-4 py-3 rounded-lg shadow-lg max-w-md z-50 animate-fade-in">
+        <div className="flex items-start">
+          <Bell className="text-yellow-400 mr-3 mt-1 flex-shrink-0" size={20} />
+          <div>
+            <h3 className="font-bold">Breaking News!</h3>
+            <p className="text-sm">{newsAlertContent}</p>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   if (shouldShowCompletionScreen) {
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-8">
@@ -2698,7 +2841,18 @@ function Game() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-900 p-8">
+    <div className="min-h-screen bg-gray-900 pb-16">
+      {/* Add NewsAlert component */}
+      <NewsAlert />
+      
+      {/* Add timer counter display */}
+      <div className="fixed top-4 right-4 bg-gray-800 rounded-lg p-2 z-40">
+        <div className="flex items-center gap-2">
+          <Timer size={16} className="text-blue-400" />
+          <span className="text-sm font-mono">News Timer: {timerSeconds}s</span>
+        </div>
+      </div>
+      
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-start mb-8">
           <div className="flex items-center gap-4">
@@ -2793,7 +2947,7 @@ function Game() {
             <div className="flex items-center gap-4">
               <div className="flex items-center gap-2 bg-gray-800 px-4 py-2 rounded-lg">
                 <Timer className="text-yellow-500" />
-                <span className="text-white font-mono text-xl">{timeLeft}s</span>
+                <span className="text-white font-mono text-xl">Time Left: {timeLeft}s</span>
               </div>
               <button
                 onClick={() => {

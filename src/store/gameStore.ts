@@ -19,12 +19,16 @@ interface GameState {
   pausedAt: string | null;
   gameStateId: string | null;
   playerHoldings: StockHolding[];
+  levelNewsEvents: LevelNewsEvent[];
+  timerSeconds: number;
+  latestNewsEvent: LevelNewsEvent | null;
+  newsUpdateInProgress: boolean;
   setPlayerInfo: (name: string, age: number, gender: string) => void;
   updateBalance: (amount: number) => void;
   addAction: (action: any) => void;
   nextLevel: () => void;
   updateStocks: () => void;
-  updateStockPrice: (stockName: string, newPrice: number, level?: number) => void;
+  updateStockPrice: (stockName: string, newPrice: number, level?: number, triggerTimeSeconds?: number, entryId?: string) => void;
   updateNewsForLevel: (level: number, news: string) => void;
   setAutoUpdate: (enabled: boolean) => void;
   resetGame: () => void;
@@ -38,6 +42,13 @@ interface GameState {
   sellStock: (stockName: string, quantity: number) => number;
   getStockAvgPrice: (stockName: string) => number;
   getStockQuantity: (stockName: string) => number;
+  incrementTimer: () => void;
+  resetTimer: () => void;
+  processTimedEvents: () => Promise<void>;
+  fetchLevelNewsEvents: () => Promise<void>;
+  updateNewsEvent: (id: string, content: string, triggerTime: number) => Promise<void>;
+  createNewsEvent: (level: number, sequenceOrder: number, content: string, triggerTime: number) => Promise<void>;
+  deleteNewsEvent: (id: string) => Promise<void>;
 }
 
 interface Stock {
@@ -52,6 +63,7 @@ interface LevelStock {
   stocks: {
     name: string;
     price: number;
+    triggerTimeSeconds?: number;
   }[];
 }
 
@@ -71,6 +83,15 @@ interface StockHolding {
     price: number;
     timestamp: string;
   }[];
+}
+
+interface LevelNewsEvent {
+  id: string;
+  level: number;
+  sequenceOrder: number;
+  content: string;
+  triggerTimeSeconds: number;
+  processed?: boolean;
 }
 
 // Default initial values to use if database fetch fails
@@ -98,7 +119,7 @@ const initialLevelStocks = Array.from({ length: 10 }, (_, i) => ({
 }));
 
 const initialNews = [
-  'Breaking: Reliance Industries announces major expansion in renewable energy division, market anticipates significant growth',
+  'Market opens stable',
   'Tata Motors unveils new electric vehicle lineup, stock surges on positive investor sentiment',
   'HDFC Bank reports record quarterly profit, exceeding analyst expectations',
   'Infosys secures multi-million dollar IT infrastructure deal with global financial institutions',
@@ -128,6 +149,10 @@ export const useGameStore = create<GameState>((set, get) => ({
   pausedAt: null,
   gameStateId: null,
   playerHoldings: [],
+  levelNewsEvents: [],
+  timerSeconds: 0,
+  latestNewsEvent: null,
+  newsUpdateInProgress: false,
   
   setPlayerInfo: (name, age, gender) => set({ playerName: name, playerAge: age, playerGender: gender }),
   
@@ -197,38 +222,19 @@ export const useGameStore = create<GameState>((set, get) => ({
     return { 
       currentLevel: nextLevelIndex,
       stocks: updatedStocks,
-      stockPerformance: updatedPerformance
+      stockPerformance: updatedPerformance,
+      latestNewsEvent: null
     };
   }),
   
   updateStocks: () => set((state) => {
     if (!state.autoUpdateEnabled || state.isPaused) return state;
 
-    const updatedStocks = state.stocks.map(stock => {
-      const volatility = 0.02;
-      const change = (Math.random() - 0.5) * 2 * volatility * stock.price;
-      const newPrice = Number((stock.price + change).toFixed(2));
-      return {
-        ...stock,
-        previousPrice: stock.price,
-        price: Math.max(1, newPrice),
-        history: [...stock.history, newPrice],
-      };
-    });
-
-    const updatedPerformance = updatedStocks.map(stock => ({
-      name: stock.name,
-      change: Number(((stock.price - stock.previousPrice) / stock.previousPrice * 100).toFixed(1)),
-      currentPrice: stock.price
-    }));
-
-    return {
-      stocks: updatedStocks,
-      stockPerformance: updatedPerformance
-    };
+    // Returning the state without modifying stock prices
+    return state;
   }),
 
-  updateStockPrice: async (stockName: string, newPrice: number, level?: number) => {
+  updateStockPrice: async (stockName: string, newPrice: number, level?: number, triggerTimeSeconds?: number, entryId?: string) => {
     // Keep the price exactly as provided by the admin
     // No formatting applied to preserve the exact value
     
@@ -241,7 +247,11 @@ export const useGameStore = create<GameState>((set, get) => ({
           return {
             ...levelStock,
             stocks: levelStock.stocks.map(stock => 
-              stock.name === stockName ? { ...stock, price: newPrice } : stock
+              stock.name === stockName ? { 
+                ...stock, 
+                price: newPrice,
+                triggerTimeSeconds: triggerTimeSeconds !== undefined ? triggerTimeSeconds : stock.triggerTimeSeconds 
+              } : stock
             )
           };
         }
@@ -337,14 +347,54 @@ export const useGameStore = create<GameState>((set, get) => ({
     // Then update the database with the exact price (no formatting)
     try {
       if (typeof level === 'number') {
-        // Update level stock price
+        // If an entry ID is provided, update that specific entry
+        if (entryId) {
+          const { error } = await supabase
+            .from('level_stocks')
+            .update({ 
+              price: newPrice,
+              trigger_time_seconds: triggerTimeSeconds || 120
+            })
+            .eq('id', entryId);
+            
+          if (error) throw error;
+        } else {
+          // Check if the entry already exists
+          const { data, error: checkError } = await supabase
+            .from('level_stocks')
+            .select('id')
+            .eq('level', level)
+            .eq('stock_name', stockName)
+            .eq('trigger_time_seconds', triggerTimeSeconds || 120);
+            
+          if (checkError) throw checkError;
+          
+          if (data && data.length > 0) {
+            // Update existing entry
         const { error } = await supabase
           .from('level_stocks')
           .update({ price: newPrice })
           .eq('level', level)
-          .eq('stock_name', stockName);
+              .eq('stock_name', stockName)
+              .eq('trigger_time_seconds', triggerTimeSeconds || 120);
 
         if (error) throw error;
+          } else {
+            // Insert new entry if it doesn't exist
+            const newEntry = {
+              stock_name: stockName,
+              price: newPrice,
+              level: level,
+              trigger_time_seconds: triggerTimeSeconds || 120
+            };
+            
+            const { error } = await supabase
+              .from('level_stocks')
+              .insert(newEntry);
+              
+            if (error) throw error;
+          }
+        }
       } else {
         // Update current stock price
         const { error } = await supabase
@@ -398,6 +448,10 @@ export const useGameStore = create<GameState>((set, get) => ({
     isLoading: false,
     pausedAt: null,
     playerHoldings: [],
+    levelNewsEvents: [],
+    timerSeconds: 0,
+    latestNewsEvent: null,
+    newsUpdateInProgress: false,
   }),
 
   setGameCompleted: (completed: boolean) => set({ gameCompleted: completed }),
@@ -476,12 +530,13 @@ export const useGameStore = create<GameState>((set, get) => ({
 
       if (stocksError) throw stocksError;
 
-      // Fetch level stocks
+      // Fetch level stocks - Note: now there may be multiple entries per stock and level
       const { data: levelStocksData, error: levelStocksError } = await supabase
         .from('level_stocks')
         .select('*')
         .order('level', { ascending: true })
-        .order('stock_name', { ascending: true });
+        .order('stock_name', { ascending: true })
+        .order('trigger_time_seconds', { ascending: true });
 
       if (levelStocksError) throw levelStocksError;
 
@@ -518,15 +573,32 @@ export const useGameStore = create<GameState>((set, get) => ({
           return groups;
         }, {});
 
-        // Create level stocks array
+        // Create level stocks array - now handling multiple entries per stock
         updatedLevelStocks = Array.from({ length: 10 }, (_, i) => {
           const levelStocks = levelGroups[i] || [];
+          
+          // Get unique stock names in this level
+          const stockNames = [...new Set(levelStocks.map((ls: any) => ls.stock_name))] as string[];
+          
+          // For each stock name, get all entries (there may be multiple with different trigger times)
+          const stocks = stockNames.map(stockName => {
+            // Get all entries for this stock name
+            const stockEntries = levelStocks.filter((ls: any) => ls.stock_name === stockName);
+            
+            // Use the first entry's price as the default price
+            // (this maintains compatibility with existing code expecting a single price)
+            const firstEntry = stockEntries[0];
+            
+            return {
+              name: stockName,
+              price: firstEntry ? Number(firstEntry.price) : 0,
+              triggerTimeSeconds: firstEntry ? Number(firstEntry.trigger_time_seconds) : 120
+            };
+          });
+          
           return {
             level: i,
-            stocks: levelStocks.map((ls: any) => ({
-              name: ls.stock_name,
-              price: ls.price
-            }))
+            stocks: stocks
           };
         });
         
@@ -573,6 +645,9 @@ export const useGameStore = create<GameState>((set, get) => ({
           return levelNews ? levelNews.content : initialNews[i];
         });
       }
+      
+      // Ensure Level 1 news is always set correctly regardless of database state
+      updatedNews[0] = 'Market opens stable';
 
       // Calculate stock performance
       const updatedPerformance = updatedStocks.map(stock => ({
@@ -591,6 +666,9 @@ export const useGameStore = create<GameState>((set, get) => ({
       });
       
       console.log('Game data loaded from database with complete price history');
+      
+      // Also fetch level news events
+      await get().fetchLevelNewsEvents();
     } catch (error) {
       console.error('Error fetching game data:', error);
       // Fall back to initial values if fetch fails
@@ -613,27 +691,30 @@ export const useGameStore = create<GameState>((set, get) => ({
         .on('postgres_changes', 
           { event: 'UPDATE', schema: 'public', table: 'stocks' },
           (payload) => {
-            // Update the local state when a stock price changes
-            const { new: newRecord } = payload;
-            if (newRecord) {
-              const store = get();
-              const stockName = newRecord.name;
-              const newPrice = newRecord.price;
-              
-              // Only update if we're not the one who triggered the change
-              // This check prevents infinite loops
-              const currentStock = store.stocks.find(s => s.name === stockName);
-              if (currentStock && currentStock.price !== newPrice) {
-                // Update the stock
-                store.updateStockPrice(stockName, newPrice);
-                
-                // Emit custom event for the Game component to show visual feedback
-                const updateEvent = new CustomEvent('stock-price-updated', {
-                  detail: { name: stockName, price: newPrice }
-                });
-                window.dispatchEvent(updateEvent);
-              }
-            }
+            // Commented out to prevent automatic price updates
+            // const { new: newRecord } = payload;
+            // if (newRecord) {
+            //   const store = get();
+            //   const stockName = newRecord.name;
+            //   const newPrice = newRecord.price;
+            //   
+            //   // Only update if we're not the one who triggered the change
+            //   // This check prevents infinite loops
+            //   const currentStock = store.stocks.find(s => s.name === stockName);
+            //   if (currentStock && currentStock.price !== newPrice) {
+            //     // Update the stock
+            //     store.updateStockPrice(stockName, newPrice);
+            //     
+            //     // Emit custom event for the Game component to show visual feedback
+            //     const updateEvent = new CustomEvent('stock-price-updated', {
+            //       detail: { name: stockName, price: newPrice }
+            //     });
+            //     window.dispatchEvent(updateEvent);
+            //   }
+            // }
+            
+            // Do nothing to prevent price updates
+            console.log('Stock price update received but ignored to prevent automatic changes');
           }
         )
         
@@ -641,29 +722,32 @@ export const useGameStore = create<GameState>((set, get) => ({
         .on('postgres_changes',
           { event: 'UPDATE', schema: 'public', table: 'level_stocks' },
           (payload) => {
-            // Update the local state when a level stock price changes
-            const { new: newRecord } = payload;
-            if (newRecord) {
-              const store = get();
-              const stockName = newRecord.stock_name;
-              const level = newRecord.level;
-              const newPrice = newRecord.price;
-              
-              // Only update if we're not the one who triggered the change
-              const levelStock = store.levelStocks[level]?.stocks.find(s => s.name === stockName);
-              if (levelStock && levelStock.price !== newPrice) {
-                // Update the stock
-                store.updateStockPrice(stockName, newPrice, level);
-                
-                // If this is for the current level, emit custom event
-                if (level === store.currentLevel) {
-                  const updateEvent = new CustomEvent('stock-price-updated', {
-                    detail: { name: stockName, price: newPrice }
-                  });
-                  window.dispatchEvent(updateEvent);
-                }
-              }
-            }
+            // Commented out to prevent automatic price updates
+            // const { new: newRecord } = payload;
+            // if (newRecord) {
+            //   const store = get();
+            //   const stockName = newRecord.stock_name;
+            //   const level = newRecord.level;
+            //   const newPrice = newRecord.price;
+            //   
+            //   // Only update if we're not the one who triggered the change
+            //   const levelStock = store.levelStocks[level]?.stocks.find(s => s.name === stockName);
+            //   if (levelStock && levelStock.price !== newPrice) {
+            //     // Update the stock
+            //     store.updateStockPrice(stockName, newPrice, level);
+            //     
+            //     // If this is for the current level, emit custom event
+            //     if (level === store.currentLevel) {
+            //       const updateEvent = new CustomEvent('stock-price-updated', {
+            //         detail: { name: stockName, price: newPrice }
+            //       });
+            //       window.dispatchEvent(updateEvent);
+            //     }
+            //   }
+            // }
+            
+            // Do nothing to prevent price updates
+            console.log('Level stock price update received but ignored to prevent automatic changes');
           }
         )
         
@@ -709,6 +793,51 @@ export const useGameStore = create<GameState>((set, get) => ({
                 
                 console.log(`Game ${isPaused ? 'paused' : 'resumed'} by admin`);
               }
+            }
+          }
+        )
+        
+        // Add handler for level_news_events changes
+        .on('postgres_changes',
+          { event: '*', schema: 'public', table: 'level_news_events' },
+          (payload) => {
+            const { new: newRecord, old: oldRecord, eventType } = payload;
+            
+            // Handle different event types
+            if (eventType === 'INSERT' && newRecord) {
+              const newEvent: LevelNewsEvent = {
+                id: newRecord.id,
+                level: newRecord.level,
+                sequenceOrder: newRecord.sequence_order,
+                content: newRecord.content,
+                triggerTimeSeconds: newRecord.trigger_time_seconds,
+                processed: false
+              };
+              
+              set(state => ({
+                levelNewsEvents: [...state.levelNewsEvents, newEvent]
+              }));
+            } else if (eventType === 'UPDATE' && newRecord) {
+              set(state => ({
+                levelNewsEvents: state.levelNewsEvents.map(event => 
+                  event.id === newRecord.id 
+                    ? {
+                        id: newRecord.id,
+                        level: newRecord.level,
+                        sequenceOrder: newRecord.sequence_order,
+                        content: newRecord.content,
+                        triggerTimeSeconds: newRecord.trigger_time_seconds,
+                        processed: event.processed
+                      }
+                    : event
+                )
+              }));
+            } else if (eventType === 'DELETE' && oldRecord) {
+              set(state => ({
+                levelNewsEvents: state.levelNewsEvents.filter(event => 
+                  event.id !== oldRecord.id
+                )
+              }));
             }
           }
         )
@@ -856,5 +985,203 @@ export const useGameStore = create<GameState>((set, get) => ({
     const state = get();
     const holding = state.playerHoldings.find(h => h.name === stockName);
     return holding ? holding.quantity : 0;
-  }
+  },
+
+  incrementTimer: () => {
+    if (get().isPaused || get().gameCompleted) return;
+    
+    set(state => ({ timerSeconds: state.timerSeconds + 1 }));
+    get().processTimedEvents();
+  },
+  
+  resetTimer: () => set({ timerSeconds: 0 }),
+  
+  processTimedEvents: async () => {
+    const state = get();
+    
+    // Don't process if game is paused, completed, or another update is in progress
+    if (state.isPaused || state.gameCompleted || state.newsUpdateInProgress) return;
+    
+    const currentTime = state.timerSeconds;
+    const currentLevel = state.currentLevel;
+    
+    // Find news events that should be triggered at this time
+    const newsEventsToProcess = state.levelNewsEvents.filter(
+      event => event.level === currentLevel && 
+               event.triggerTimeSeconds === currentTime &&
+               !event.processed
+    );
+    
+    // Fetch the latest stock data directly from the database to capture all entries
+    let stocksToUpdate: { stock_name: string, price: number }[] = [];
+    
+    try {
+      // Query the database for all stock entries at the current level and time
+      const { data, error } = await supabase
+        .from('level_stocks')
+        .select('stock_name, price')
+        .eq('level', currentLevel)
+        .eq('trigger_time_seconds', currentTime);
+        
+      if (error) {
+        console.error('Error fetching timed stock updates:', error);
+      } else if (data) {
+        stocksToUpdate = data;
+      }
+    } catch (error) {
+      console.error('Error in database query for stock updates:', error);
+    }
+    
+    // If we have no news events and no stock updates, return early
+    if (newsEventsToProcess.length === 0 && stocksToUpdate.length === 0) return;
+    
+    // Mark that we're processing an update
+    set({ newsUpdateInProgress: true });
+    
+    try {
+      // Process stock updates first
+      if (stocksToUpdate.length > 0) {
+        // Silently update each stock price without triggering a notification
+        for (const stock of stocksToUpdate) {
+          await state.updateStockPrice(stock.stock_name, stock.price);
+        }
+      }
+      
+      // Then process news events
+      for (const newsEvent of newsEventsToProcess) {
+        // Update news display
+        const updatedNewsEvents = state.levelNewsEvents.map(event => 
+          event.id === newsEvent.id ? { ...event, processed: true } : event
+        );
+        
+        // Set the latest news event for display
+        set({ 
+          latestNewsEvent: newsEvent,
+          levelNewsEvents: updatedNewsEvents
+        });
+        
+        // Update the current news for this level
+        const updatedNews = [...state.news];
+        updatedNews[currentLevel] = newsEvent.content;
+        
+        set({ news: updatedNews });
+        
+        // Emit an event for the client to show the news update
+        const newsUpdateEvent = new CustomEvent('news-event-triggered', {
+          detail: { content: newsEvent.content, level: currentLevel, time: currentTime }
+        });
+        window.dispatchEvent(newsUpdateEvent);
+      }
+    } catch (error) {
+      console.error('Error processing timed events:', error);
+    } finally {
+      // Mark that we're done processing
+      set({ newsUpdateInProgress: false });
+    }
+  },
+  
+  fetchLevelNewsEvents: async () => {
+    try {
+      const { data, error } = await supabase
+        .from('level_news_events')
+        .select('*')
+        .order('level', { ascending: true })
+        .order('sequence_order', { ascending: true });
+      
+      if (error) throw error;
+      
+      if (data) {
+        const formattedEvents: LevelNewsEvent[] = data.map(event => ({
+          id: event.id,
+          level: event.level,
+          sequenceOrder: event.sequence_order,
+          content: event.content,
+          triggerTimeSeconds: event.trigger_time_seconds,
+          processed: false
+        }));
+        
+        set({ levelNewsEvents: formattedEvents });
+      }
+    } catch (error) {
+      console.error('Error fetching level news events:', error);
+    }
+  },
+  
+  updateNewsEvent: async (id: string, content: string, triggerTime: number) => {
+    try {
+      const { error } = await supabase
+        .from('level_news_events')
+        .update({ 
+          content: content,
+          trigger_time_seconds: triggerTime
+        })
+        .eq('id', id);
+      
+      if (error) throw error;
+      
+      // Update local state
+      set(state => ({
+        levelNewsEvents: state.levelNewsEvents.map(event => 
+          event.id === id 
+            ? { ...event, content, triggerTimeSeconds: triggerTime }
+            : event
+        )
+      }));
+    } catch (error) {
+      console.error('Error updating news event:', error);
+    }
+  },
+  
+  createNewsEvent: async (level: number, sequenceOrder: number, content: string, triggerTime: number) => {
+    try {
+      const { data, error } = await supabase
+        .from('level_news_events')
+        .insert({
+          level: level,
+          sequence_order: sequenceOrder,
+          content: content,
+          trigger_time_seconds: triggerTime
+        })
+        .select()
+        .single();
+      
+      if (error) throw error;
+      
+      if (data) {
+        // Add to local state
+        const newEvent: LevelNewsEvent = {
+          id: data.id,
+          level: data.level,
+          sequenceOrder: data.sequence_order,
+          content: data.content,
+          triggerTimeSeconds: data.trigger_time_seconds,
+          processed: false
+        };
+        
+        set(state => ({
+          levelNewsEvents: [...state.levelNewsEvents, newEvent]
+        }));
+      }
+    } catch (error) {
+      console.error('Error creating news event:', error);
+    }
+  },
+  
+  deleteNewsEvent: async (id: string) => {
+    try {
+      const { error } = await supabase
+        .from('level_news_events')
+        .delete()
+        .eq('id', id);
+      
+      if (error) throw error;
+      
+      // Remove from local state
+      set(state => ({
+        levelNewsEvents: state.levelNewsEvents.filter(event => event.id !== id)
+      }));
+    } catch (error) {
+      console.error('Error deleting news event:', error);
+    }
+  },
 }));

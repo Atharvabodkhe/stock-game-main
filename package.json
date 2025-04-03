@@ -10,16 +10,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.7",
+    "@supabase/supabase-js": "^2.49.4",
     "@types/marked": "^5.0.2",
     "date-fns": "^4.1.0",
+    "dotenv": "^16.4.7",
     "groq-sdk": "^0.16.0",
     "lucide-react": "^0.344.0",
     "marked": "^15.0.7",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.22.2",
-    "recharts": "^2.12.2",
+    "recharts": "^2.15.2",
     "zustand": "^4.5.2"
   },
   "devDependencies": {

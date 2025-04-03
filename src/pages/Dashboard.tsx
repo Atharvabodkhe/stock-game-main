@@ -23,6 +23,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { useRealtimeSubscription } from "../hooks/useRealtimeSubscription";
+import TradingAnalysis from "../components/TradingAnalysis";
 
 interface GameSession {
   id: string;
@@ -40,8 +41,12 @@ interface GameSession {
 interface GameAction {
   stock_name: string;
   action: string;
+  action_type?: string;
   price: number;
   timestamp: string;
+  quantity?: number;
+  level?: number;
+  action_time_seconds?: number;
 }
 
 interface GameRoom {
@@ -834,6 +839,45 @@ function Dashboard() {
         return [];
       }
 
+      // Group actions by level to calculate action_time_seconds if not already available
+      const actionsByLevel: Record<number, any[]> = {};
+      
+      // First pass: group by level
+      data.forEach(action => {
+        const level = action.level !== undefined ? action.level : 0;
+        if (!actionsByLevel[level]) {
+          actionsByLevel[level] = [];
+        }
+        actionsByLevel[level].push({...action});
+      });
+      
+      // Second pass: calculate action_time_seconds for each level
+      Object.keys(actionsByLevel).forEach(levelKey => {
+        const level = parseInt(levelKey);
+        const levelActions = actionsByLevel[level];
+        
+        // Sort by timestamp to ensure correct order
+        levelActions.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+        
+        // Get the timestamp of the first action in this level
+        const firstActionTime = new Date(levelActions[0].timestamp).getTime();
+        
+        // Calculate action_time_seconds for each action if not already set
+        levelActions.forEach(action => {
+          if (action.action_time_seconds === undefined || action.action_time_seconds === null || action.action_time_seconds === 0) {
+            const actionTime = new Date(action.timestamp).getTime();
+            // Calculate seconds since first action in the level
+            action.action_time_seconds = Math.floor((actionTime - firstActionTime) / 1000);
+          }
+        });
+      });
+      
+      // Flatten the grouped actions back into a single array
+      data = Object.values(actionsByLevel).flat();
+      
+      // Sort by timestamp again to maintain original order
+      data.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
       // Map to expected format
       return data.map((action) => ({
         stock_name: action.stock_name,
@@ -842,6 +886,7 @@ function Dashboard() {
         quantity: action.quantity || 1,
         timestamp: action.timestamp,
         level: action.level !== undefined ? action.level : 0,
+        action_time_seconds: action.action_time_seconds
       }));
     } catch (error) {
       console.error("Error fetching trading history:", error);
@@ -1511,100 +1556,85 @@ function Dashboard() {
               {expandedSession === session.id && session.actions && (
                 <div className="space-y-6">
                   {session.actions.length > 0 ? (
-                    <>
-                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <div className="bg-gray-700 p-4 rounded-lg">
-                          <h3 className="text-lg font-semibold text-white mb-4">
-                            Trading Activity
-                          </h3>
-                          <div className="h-[300px]">
-                            <ResponsiveContainer width="100%" height="100%">
-                              <LineChart data={session.actions}>
-                                <CartesianGrid
-                                  strokeDasharray="3 3"
-                                  stroke="#374151"
-                                />
-                                <XAxis dataKey="timestamp" stroke="#9CA3AF" />
-                                <YAxis stroke="#9CA3AF" />
-                                <Tooltip content={<CustomTooltip />} />
-                                <Line
-                                  type="monotone"
-                                  dataKey="price"
-                                  stroke="#10B981"
-                                  strokeWidth={2}
-                                  dot={false}
-                                  activeDot={{ r: 6 }}
-                                />
-                              </LineChart>
-                            </ResponsiveContainer>
-                          </div>
-                        </div>
-
-                        <div className="bg-gray-700 p-4 rounded-lg">
-                          <h3 className="text-lg font-semibold text-white mb-4">
-                            Action Distribution
-                          </h3>
-                          <div className="h-[300px]">
-                            <ResponsiveContainer width="100%" height="100%">
-                              <BarChart
-                                data={[getActionStats(session.actions)]}
-                                margin={{
-                                  top: 20,
-                                  right: 30,
-                                  left: 20,
-                                  bottom: 5,
-                                }}
-                              >
-                                <CartesianGrid
-                                  strokeDasharray="3 3"
-                                  stroke="#374151"
-                                />
-                                <XAxis stroke="#9CA3AF" />
-                                <YAxis stroke="#9CA3AF" />
-                                <Tooltip />
-                                <Bar dataKey="buy" fill="#10B981" name="Buy" />
-                                <Bar
-                                  dataKey="sell"
-                                  fill="#EF4444"
-                                  name="Sell"
-                                />
-                                <Bar
-                                  dataKey="hold"
-                                  fill="#F59E0B"
-                                  name="Hold"
-                                />
-                              </BarChart>
-                            </ResponsiveContainer>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="bg-gray-700 p-4 rounded-lg">
-                        <h3 className="text-lg font-semibold text-white mb-4">
-                          Trading Statistics
+                    // Wrap TradingAnalysis in a try/catch for error handling
+                    (() => {
+                      try {
+                        // Debug the actions array
+                        console.log("Original actions:", JSON.stringify(session.actions));
+                        
+                        // Check for specific properties
+                        const actionTypes = session.actions.map(a => a.action);
+                        const stockNames = session.actions.map(a => a.stock_name);
+                        console.log("Action types:", actionTypes);
+                        console.log("Stock names:", stockNames);
+                        
+                        // Make sure actions have all required properties
+                        const formattedActions = session.actions.map(action => {
+                          // Add debug logging for each action
+                          console.log("Processing action:", action);
+                          
+                          // Check for alternate field names for action type
+                          let actionType = '';
+                          
+                          // Sometimes action is in action_type field instead
+                          if (action.action_type && typeof action.action_type === 'string') {
+                            actionType = action.action_type.toLowerCase();
+                          }
+                          // Otherwise use the action field if available
+                          else if (action.action && typeof action.action === 'string') {
+                            actionType = action.action.toLowerCase();
+                          }
+                          // Fall back to "hold" as default
+                          else {
+                            actionType = 'hold';
+                          }
+                          
+                          const formatted = {
+                            stock_name: action.stock_name || '',
+                            action: actionType,
+                            price: typeof action.price === 'number' ? action.price : parseFloat(action.price) || 0,
+                            quantity: action.quantity || 1,
+                            timestamp: action.timestamp || new Date().toISOString(),
+                            level: typeof action.level === 'number' ? action.level : 0,
+                            action_time_seconds: action.action_time_seconds // Pass through the action_time_seconds field
+                          };
+                          
+                          console.log("Formatted action:", formatted);
+                          return formatted;
+                        });
+                        
+                        console.log("Final formatted actions:", formattedActions);
+                        
+                        // Make sure finalBalance is a number
+                        const finalBalance = 
+                          session.final_balance && Math.abs(session.final_balance - 10000) > 0.01
+                            ? session.final_balance
+                            : session.game_results && session.game_results[0]?.final_balance
+                              ? session.game_results[0].final_balance
+                              : 10000;
+                        
+                        console.log("Final balance:", finalBalance);
+                              
+                        return (
+                          <TradingAnalysis 
+                            actions={formattedActions}
+                            finalBalance={finalBalance}
+                          />
+                        );
+                      } catch (error) {
+                        console.error("Error rendering TradingAnalysis:", error);
+                        return (
+                          <div className="bg-gray-700 p-8 rounded-lg text-center">
+                            <h3 className="text-lg font-semibold text-white mb-2">
+                              Trading Analysis Error
                         </h3>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                          <div className="bg-gray-800 p-4 rounded-lg">
-                            <p className="text-gray-400">Total Trades</p>
-                            <p className="text-2xl font-bold text-white">
-                              {getActionStats(session.actions).totalTrades}
+                            <p className="text-gray-400">
+                              There was an error displaying the trading analysis. Please try again later.
                             </p>
                           </div>
-                          <div className="bg-gray-800 p-4 rounded-lg">
-                            <p className="text-gray-400">Buy Orders</p>
-                            <p className="text-2xl font-bold text-green-500">
-                              {getActionStats(session.actions).buy}
-                            </p>
-                          </div>
-                          <div className="bg-gray-800 p-4 rounded-lg">
-                            <p className="text-gray-400">Sell Orders</p>
-                            <p className="text-2xl font-bold text-red-500">
-                              {getActionStats(session.actions).sell}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    </>
+                        );
+                      }
+                    })()
                   ) : (
                     <div className="bg-gray-700 p-8 rounded-lg text-center">
                       <h3 className="text-lg font-semibold text-white mb-2">
