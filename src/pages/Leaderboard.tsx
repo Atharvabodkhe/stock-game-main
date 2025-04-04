@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { generatePersonalityReport } from '../lib/groq';
+import TradingAnalysis from '../components/TradingAnalysis';
 import { 
   Users, 
   ArrowLeft, 
@@ -25,6 +26,7 @@ import {
 interface GameResult {
   id: string;
   user_id: string;
+  session_id?: string;
   final_balance: number;
   rank: number;
   profit_percentage?: number;
@@ -33,6 +35,7 @@ interface GameResult {
     email: string | null;
   } | null;
   game_session: {
+    id?: string;
     personality_report: string | null;
     trading_history?: string | null;
   } | null;
@@ -91,6 +94,7 @@ const Leaderboard: React.FC = () => {
   const [tradingActions, setTradingActions] = useState<Record<string, TradingAction[]>>({});
   const [tradingStats, setTradingStats] = useState<Record<string, TradingStats>>({});
   const [levelActions, setLevelActions] = useState<Record<string, LevelActionData[]>>({});
+  const [gameActions, setGameActions] = useState<Record<string, any[]>>({});
 
   useEffect(() => {
     if (roomId) {
@@ -632,6 +636,186 @@ Note: This is a preliminary analysis based on limited trading data. More active 
     }
   };
 
+  // Function to fetch trading history from game_action table by session_id
+  const fetchTradingHistory = async (sessionId: string, resultId?: string) => {
+    try {
+      console.log(`Fetching trading history with sessionId: ${sessionId}, resultId: ${resultId}`);
+      
+      // Define a variable to hold the data
+      let data: any[] = [];
+      
+      // 1. Try using session ID directly if provided
+      if (sessionId) {
+        console.log('Trying with session_id:', sessionId);
+        const { data: sessionData, error } = await supabase
+          .from("game_action")
+          .select("*")
+          .eq("session_id", sessionId)
+          .order("timestamp", { ascending: true });
+          
+        if (!error && sessionData && sessionData.length > 0) {
+          console.log(`Found ${sessionData.length} actions with session_id`);
+          data = sessionData;
+        } else if (error) {
+          console.error('Error fetching with session_id:', error);
+        } else {
+          console.log('No data found with session_id');
+        }
+        
+        // Try with alternate formats (some might be stored with different casing or formatting)
+        if (data.length === 0) {
+          console.log('Trying with case-insensitive session_id');
+          const { data: altData, error: altError } = await supabase
+            .from("game_action")
+            .select("*")
+            .ilike("session_id", sessionId)
+            .order("timestamp", { ascending: true });
+            
+          if (!altError && altData && altData.length > 0) {
+            console.log(`Found ${altData.length} actions with case-insensitive session_id`);
+            data = altData;
+          } else if (altError) {
+            console.error('Error fetching with case-insensitive session_id:', altError);
+          }
+        }
+      }
+      
+      // 2. If no data with session_id, try using result_id if provided
+      if (data.length === 0 && resultId) {
+        console.log('Trying with result_id:', resultId);
+        const { data: resultData, error: resultError } = await supabase
+          .from("game_action")
+          .select("*")
+          .eq("result_id", resultId)
+          .order("timestamp", { ascending: true });
+
+        if (!resultError && resultData && resultData.length > 0) {
+          console.log(`Found ${resultData.length} actions with result_id`);
+          data = resultData;
+        } else if (resultError) {
+          console.error('Error fetching with result_id:', resultError);
+        } else {
+          console.log('No data found with result_id');
+        }
+      }
+      
+      // 3. Try alternatives like game_actions table (plural) if it exists
+      if (data.length === 0) {
+        try {
+          console.log('Trying game_actions table (plural)');
+          let query = supabase.from("game_actions").select("*").order("timestamp", { ascending: true });
+          
+          if (sessionId) {
+            query = query.eq("session_id", sessionId);
+          } else if (resultId) {
+            query = query.eq("result_id", resultId);
+          }
+          
+          const { data: pluralData, error: pluralError } = await query;
+            
+          if (!pluralError && pluralData && pluralData.length > 0) {
+            console.log(`Found ${pluralData.length} actions in game_actions table`);
+            data = pluralData;
+          } else if (pluralError) {
+            console.error('Error fetching from game_actions table:', pluralError);
+          }
+        } catch (tableError) {
+          console.log("Error accessing alternative table:", tableError);
+        }
+      }
+      
+      // 4. As a last resort, try pulling from player_actions if it exists
+      if (data.length === 0) {
+        try {
+          console.log('Trying player_actions table');
+          let query = supabase.from("player_actions").select("*").order("timestamp", { ascending: true });
+          
+          if (sessionId) {
+            query = query.eq("session_id", sessionId);
+          } else if (resultId) {
+            query = query.eq("result_id", resultId);
+          }
+          
+          const { data: playerData, error: playerError } = await query;
+            
+          if (!playerError && playerData && playerData.length > 0) {
+            console.log(`Found ${playerData.length} actions in player_actions table`);
+            data = playerData;
+          } else if (playerError) {
+            console.error('Error fetching from player_actions table:', playerError);
+          }
+        } catch (tableError) {
+          console.log("Error accessing player_actions table:", tableError);
+        }
+      }
+
+      // If no data found in any table, return empty array
+      if (data.length === 0) {
+        console.log('No trading actions found in any table');
+        return [];
+      }
+
+      // Process the data
+      console.log('Processing found trading data:', data);
+      
+      // Group actions by level to calculate action_time_seconds if not already available
+      const actionsByLevel: Record<number, any[]> = {};
+      
+      // First pass: group by level
+      data.forEach(action => {
+        const level = action.level !== undefined ? action.level : 0;
+        if (!actionsByLevel[level]) {
+          actionsByLevel[level] = [];
+        }
+        actionsByLevel[level].push({...action});
+      });
+      
+      // Second pass: calculate action_time_seconds for each level
+      Object.keys(actionsByLevel).forEach(levelKey => {
+        const level = parseInt(levelKey);
+        const levelActions = actionsByLevel[level];
+        
+        // Sort by timestamp to ensure correct order
+        levelActions.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+        
+        // Get the timestamp of the first action in this level
+        const firstActionTime = new Date(levelActions[0].timestamp).getTime();
+        
+        // Calculate action_time_seconds for each action if not already set
+        levelActions.forEach(action => {
+          if (action.action_time_seconds === undefined || action.action_time_seconds === null || action.action_time_seconds === 0) {
+            const actionTime = new Date(action.timestamp).getTime();
+            // Calculate seconds since first action in the level
+            action.action_time_seconds = Math.floor((actionTime - firstActionTime) / 1000);
+          }
+        });
+      });
+      
+      // Flatten the grouped actions back into a single array
+      data = Object.values(actionsByLevel).flat();
+      
+      // Sort by timestamp again to maintain original order
+      data.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+      // Map to expected format
+      const formattedActions = data.map((action) => ({
+        stock_name: action.stock_name,
+        action: action.action_type || action.action,
+        price: action.price,
+        quantity: action.quantity || 1,
+        timestamp: action.timestamp,
+        level: action.level !== undefined ? action.level : 0,
+        action_time_seconds: action.action_time_seconds
+      }));
+      
+      console.log('Final formatted actions:', formattedActions);
+      return formattedActions;
+    } catch (error) {
+      console.error("Error fetching trading history:", error);
+      return [];
+    }
+  };
+
   // Function to get a level tag color
   const getLevelColor = (level: number): string => {
     const colors = [
@@ -658,9 +842,123 @@ Note: This is a preliminary analysis based on limited trading data. More active 
       if (result) {
         parseTradingHistory(result);
         fetchLevelActionData(result.id);
+        
+        // Fetch trading actions from game_action table using session_id
+        if (!gameActions[result.id]) {
+          (async () => {
+            try {
+              console.log('Attempting to fetch trading actions for result:', result);
+              
+              // Try to get session_id from various sources
+              let sessionId = '';
+              
+              // 1. First try to get it from the result object directly if it has a session_id field
+              if (result.session_id) {
+                sessionId = result.session_id;
+                console.log('Using session_id directly from result:', sessionId);
+              } 
+              // 2. Check if it's in the game_session object
+              else if (result.game_session?.id) {
+                sessionId = result.game_session.id;
+                console.log('Using session_id from game_session:', sessionId);
+              } 
+              // 3. If not found, try to fetch it from the game_results table
+              else {
+                console.log('Fetching session_id from game_results table for result ID:', result.id);
+                const { data: resultData, error } = await supabase
+                  .from('game_results')
+                  .select('session_id')
+                  .eq('id', result.id)
+                  .single();
+                  
+                if (resultData?.session_id) {
+                  sessionId = resultData.session_id;
+                  console.log('Found session_id in game_results table:', sessionId);
+                } else if (error) {
+                  console.error('Error fetching session_id:', error);
+                }
+              }
+              
+              // Try to fetch actions if we found a session ID
+              if (sessionId) {
+                const actions = await fetchTradingHistory(sessionId, result.id);
+                
+                if (actions && actions.length > 0) {
+                  console.log(`Loaded ${actions.length} actions from game_action table`);
+                  setGameActions(prev => ({ ...prev, [result.id]: actions }));
+                } else {
+                  console.log('No actions found in game_action table for session ID:', sessionId);
+                  
+                  // If no actions were found directly, try with result_id
+                  console.log('Trying with result_id directly:', result.id);
+                  const actionsByResult = await fetchTradingHistory('', result.id);
+                  
+                  if (actionsByResult && actionsByResult.length > 0) {
+                    console.log(`Loaded ${actionsByResult.length} actions using result_id`);
+                    setGameActions(prev => ({ ...prev, [result.id]: actionsByResult }));
+                  } else {
+                    console.log('No actions found using either session_id or result_id');
+                  }
+                }
+              } else {
+                console.log('No session_id found for this result, trying with result_id only');
+                const actionsByResult = await fetchTradingHistory('', result.id);
+                
+                if (actionsByResult && actionsByResult.length > 0) {
+                  console.log(`Loaded ${actionsByResult.length} actions using result_id only`);
+                  setGameActions(prev => ({ ...prev, [result.id]: actionsByResult }));
+                }
+              }
+            } catch (error) {
+              console.error('Error fetching trading actions:', error);
+            }
+          })();
+        }
       }
     }
   }, [showReport, results]);
+
+  // Generate mock trading data for demonstration
+  const generateMockTradeData = (resultId: string): any[] => {
+    const stocks = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA'];
+    const actions = ['buy', 'sell'];
+    const mockData = [];
+    const levels = [1, 2, 3];
+    
+    // Generate a random date in the last week
+    const getRandomDate = () => {
+      const date = new Date();
+      date.setDate(date.getDate() - Math.floor(Math.random() * 7));
+      date.setHours(Math.floor(Math.random() * 24));
+      date.setMinutes(Math.floor(Math.random() * 60));
+      return date.toISOString();
+    };
+    
+    // Create some mock data
+    for (let i = 0; i < 20; i++) {
+      const level = levels[Math.floor(Math.random() * levels.length)];
+      const stock = stocks[Math.floor(Math.random() * stocks.length)];
+      const action = actions[Math.floor(Math.random() * actions.length)];
+      const price = 100 + Math.floor(Math.random() * 900);
+      const quantity = 1 + Math.floor(Math.random() * 10);
+      
+      mockData.push({
+        stock_name: stock,
+        action: action,
+        price: price,
+        quantity: quantity,
+        timestamp: getRandomDate(),
+        level: level,
+        action_time_seconds: i * 60, // Every minute
+        result_id: resultId
+      });
+    }
+    
+    // Sort by timestamp
+    mockData.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    
+    return mockData;
+  };
 
   if (loading) {
     return (
@@ -905,187 +1203,124 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                         )}
                       </div>
                       
-                      {/* Trading Activity Section */}
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
-                        <div className="bg-gray-700 p-4 rounded-lg">
-                          <h4 className="text-lg font-semibold text-blue-400 mb-3">Trading Activity</h4>
-                          <div className="max-h-64 overflow-y-auto">
-                            {tradingActions[result.id]?.length > 0 ? (
-                              <div className="space-y-4">
-                                {/* Group actions by level */}
-                                {[...new Set(tradingActions[result.id].map(a => a.level || 0))]
-                                  .sort((a, b) => a - b)
-                                  .map(level => (
-                                    <div key={`level-${level}`} className="mb-4">
-                                      <div className="flex items-center gap-2 mb-2">
-                                        <span className={`${getLevelColor(level)} text-white text-xs px-2 py-1 rounded`}>
-                                          Level {level || 1}
-                                        </span>
-                                        <span className="text-sm text-gray-400">
-                                          {tradingStats[result.id]?.levelStats?.[level]?.totalTrades || 0} actions
-                                        </span>
-                                      </div>
-                                      <div className="space-y-2">
-                                        {tradingActions[result.id]
-                                          .filter(action => (action.level || 0) === level)
-                                          .map((action, index) => (
-                                            <div key={index} className="bg-gray-800 p-2 rounded flex items-center justify-between">
-                                              <div className="flex items-center gap-2">
-                                                {getActionIcon(action.action)}
-                                                <span className="font-medium">{action.action.toUpperCase()}</span>
-                                                <span className="text-gray-400">{action.stock_name}</span>
-                                              </div>
-                                              <div className="flex items-center gap-4">
-                                                <span>{action.quantity} shares</span>
-                                                <span className="font-semibold">₹{action.price?.toFixed(2)}</span>
-                                              </div>
-                                            </div>
-                                          ))
-                                        }
-                                      </div>
-                                    </div>
-                                  ))
-                                }
-                              </div>
-                            ) : (
-                              <div className="text-center py-6 text-gray-400">
-                                <BarChart className="mx-auto mb-2 opacity-50" size={32} />
-                                <p>No trading activity recorded</p>
-                              </div>
-                            )}
-                          </div>
-                        </div>
+                      {/* Trading Analysis Section */}
+                      <div className="mt-6">
+                        <h4 className="text-lg font-semibold text-blue-400 mb-3">Trading Analysis</h4>
                         
-                        <div className="bg-gray-700 p-4 rounded-lg">
-                          <h4 className="text-lg font-semibold text-blue-400 mb-3">Action Distribution</h4>
-                          <div className="h-64 flex items-center justify-center">
-                            {tradingStats[result.id]?.totalTrades > 0 ? (
-                              <div className="w-full h-full">
-                                <div className="flex items-end justify-around pb-4 h-3/4">
-                                  {tradingStats[result.id].buyOrders > 0 && (
-                                    <div className="flex flex-col items-center">
-                                      <div className="bg-green-500 w-12" style={{ 
-                                        height: `${(tradingStats[result.id].buyOrders / tradingStats[result.id].totalTrades) * 100}%` 
-                                      }}></div>
-                                      <span className="mt-2">Buy</span>
-                                    </div>
-                                  )}
-                                  {tradingStats[result.id].sellOrders > 0 && (
-                                    <div className="flex flex-col items-center">
-                                      <div className="bg-red-500 w-12" style={{ 
-                                        height: `${(tradingStats[result.id].sellOrders / tradingStats[result.id].totalTrades) * 100}%` 
-                                      }}></div>
-                                      <span className="mt-2">Sell</span>
-                                    </div>
-                                  )}
-                                </div>
-                                
-                                {/* Level breakdown */}
-                                <div className="mt-4">
-                                  <h5 className="text-sm text-gray-400 mb-2">Actions per level:</h5>
-                                  <div className="flex gap-2 flex-wrap">
-                                    {tradingStats[result.id]?.levelStats && 
-                                      Object.entries(tradingStats[result.id].levelStats || {})
-                                        .sort(([a], [b]) => Number(a) - Number(b))
-                                        .map(([level, stats]) => (
-                                          <div key={`level-stats-${level}`} 
-                                               className={`${getLevelColor(Number(level))} px-2 py-1 rounded text-xs flex items-center gap-1`}>
-                                            <span>L{level}:</span>
-                                            <span>{stats.totalTrades}</span>
-                                          </div>
-                                        ))
-                                    }
-                                  </div>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="text-center text-gray-400">
-                                <BarChart className="mx-auto mb-2 opacity-50" size={32} />
-                                <p>No action data available</p>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                      
-                      {/* Trading Statistics */}
-                      <div className="bg-gray-700 p-4 rounded-lg mt-6">
-                        <h4 className="text-lg font-semibold text-blue-400 mb-3">Trading Statistics</h4>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                          <div className="bg-gray-800 p-4 rounded-lg">
-                            <h5 className="text-gray-400 mb-2">Total Trades</h5>
-                            <p className="text-4xl font-bold">{tradingStats[result.id]?.totalTrades || 0}</p>
-                          </div>
-                          <div className="bg-gray-800 p-4 rounded-lg">
-                            <h5 className="text-gray-400 mb-2">Buy Orders</h5>
-                            <p className="text-4xl font-bold text-green-500">{tradingStats[result.id]?.buyOrders || 0}</p>
-                          </div>
-                          <div className="bg-gray-800 p-4 rounded-lg">
-                            <h5 className="text-gray-400 mb-2">Sell Orders</h5>
-                            <p className="text-4xl font-bold text-red-500">{tradingStats[result.id]?.sellOrders || 0}</p>
-                          </div>
-                        </div>
-                        
-                        {/* Add advanced level statistics section */}
-                        {levelActions[result.id] && levelActions[result.id].length > 0 && (
-                          <div className="mt-6">
-                            <h5 className="text-lg font-semibold text-blue-300 mb-3">Advanced Level Statistics</h5>
-                            <div className="bg-gray-800 p-4 rounded-lg">
-                              <div className="overflow-x-auto">
-                                <table className="w-full text-left">
-                                  <thead>
-                                    <tr className="border-b border-gray-700">
-                                      <th className="py-2 px-3">Level</th>
-                                      <th className="py-2 px-3">Total</th>
-                                      <th className="py-2 px-3">Buy</th>
-                                      <th className="py-2 px-3">Sell</th>
-                                      <th className="py-2 px-3">Avg Buy Price</th>
-                                      <th className="py-2 px-3">Avg Sell Price</th>
-                                      <th className="py-2 px-3">Buy Quantity</th>
-                                      <th className="py-2 px-3">Sell Quantity</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {levelActions[result.id].map((levelData) => (
-                                      <tr key={`level-${levelData.level}`} className="border-b border-gray-700">
-                                        <td className="py-2 px-3">
-                                          <span className={`${getLevelColor(levelData.level)} text-white text-xs px-2 py-1 rounded`}>
-                                            Level {levelData.level}
-                                          </span>
-                                        </td>
-                                        <td className="py-2 px-3">{levelData.totalTrades}</td>
-                                        <td className="py-2 px-3 text-green-500">{levelData.buyOrders}</td>
-                                        <td className="py-2 px-3 text-red-500">{levelData.sellOrders}</td>
-                                        <td className="py-2 px-3">₹{levelData.avgBuyPrice?.toFixed(2) || '0.00'}</td>
-                                        <td className="py-2 px-3">₹{levelData.avgSellPrice?.toFixed(2) || '0.00'}</td>
-                                        <td className="py-2 px-3">{levelData.totalBuyQuantity}</td>
-                                        <td className="py-2 px-3">{levelData.totalSellQuantity}</td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
+                        {gameActions[result.id] && gameActions[result.id].length > 0 ? (
+                          // 1. If we have game actions data from the database, use the TradingAnalysis component
+                          <TradingAnalysis 
+                            actions={gameActions[result.id] as any[]} 
+                            finalBalance={result.final_balance}
+                          />
+                        ) : tradingActions[result.id] && tradingActions[result.id].length > 0 ? (
+                          // 2. If we have trading actions from trading_history, use those
+                          <TradingAnalysis 
+                            actions={tradingActions[result.id] as any[]} 
+                            finalBalance={result.final_balance}
+                          />
+                        ) : (
+                          // 3. No data - create mock data for demonstration if needed and use the Trading Activity sections
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div className="bg-gray-700 p-4 rounded-lg">
+                              <h4 className="text-lg font-semibold text-blue-400 mb-3">Trading Activity</h4>
+                              <div className="flex flex-col items-center justify-center py-8">
+                                <BarChart className="mb-4 text-gray-500" size={48} />
+                                <p className="text-gray-400 mb-2">No trading activity recorded for this player</p>
                               </div>
                             </div>
                             
-                            {/* Level-based trading performance chart */}
-                            <div className="mt-4 bg-gray-800 p-4 rounded-lg">
-                              <h5 className="text-gray-400 mb-3">Level-based Trading Intensity</h5>
-                              <div className="h-40 flex items-end justify-around">
-                                {levelActions[result.id].map((levelData) => (
-                                  <div key={`bar-${levelData.level}`} className="flex flex-col items-center">
-                                    <div 
-                                      className={`${getLevelColor(levelData.level)} w-12`}
-                                      style={{ height: `${Math.min(100, (levelData.totalTrades / Math.max(...levelActions[result.id].map(d => d.totalTrades))) * 100)}%` }}
-                                    ></div>
-                                    <span className="mt-2 text-xs">Level {levelData.level}</span>
-                                    <span className="text-xs text-gray-400">{levelData.totalTrades}</span>
-                                  </div>
-                                ))}
+                            <div className="bg-gray-700 p-4 rounded-lg">
+                              <h4 className="text-lg font-semibold text-blue-400 mb-3">Action Distribution</h4>
+                              <div className="flex flex-col items-center justify-center py-8">
+                                <BarChart className="mb-4 text-gray-500" size={48} />
+                                <p className="text-gray-400">No action distribution data available</p>
                               </div>
                             </div>
                           </div>
                         )}
                       </div>
+                      
+                      {/* Trading Statistics - only show if using legacy view */}
+                      {(!gameActions[result.id] || gameActions[result.id].length === 0) && (
+                        <div className="bg-gray-700 p-4 rounded-lg mt-6">
+                          <h4 className="text-lg font-semibold text-blue-400 mb-3">Trading Statistics</h4>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                            <div className="bg-gray-800 p-4 rounded-lg">
+                              <h5 className="text-gray-400 mb-2">Total Trades</h5>
+                              <p className="text-4xl font-bold">{tradingStats[result.id]?.totalTrades || 0}</p>
+                            </div>
+                            <div className="bg-gray-800 p-4 rounded-lg">
+                              <h5 className="text-gray-400 mb-2">Buy Orders</h5>
+                              <p className="text-4xl font-bold text-green-500">{tradingStats[result.id]?.buyOrders || 0}</p>
+                            </div>
+                            <div className="bg-gray-800 p-4 rounded-lg">
+                              <h5 className="text-gray-400 mb-2">Sell Orders</h5>
+                              <p className="text-4xl font-bold text-red-500">{tradingStats[result.id]?.sellOrders || 0}</p>
+                            </div>
+                          </div>
+                          
+                          {/* Add advanced level statistics section */}
+                          {levelActions[result.id] && levelActions[result.id].length > 0 && (
+                            <div className="mt-6">
+                              <h5 className="text-lg font-semibold text-blue-300 mb-3">Advanced Level Statistics</h5>
+                              <div className="bg-gray-800 p-4 rounded-lg">
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-left">
+                                    <thead>
+                                      <tr className="border-b border-gray-700">
+                                        <th className="py-2 px-3">Level</th>
+                                        <th className="py-2 px-3">Total</th>
+                                        <th className="py-2 px-3">Buy</th>
+                                        <th className="py-2 px-3">Sell</th>
+                                        <th className="py-2 px-3">Avg Buy Price</th>
+                                        <th className="py-2 px-3">Avg Sell Price</th>
+                                        <th className="py-2 px-3">Buy Quantity</th>
+                                        <th className="py-2 px-3">Sell Quantity</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {levelActions[result.id].map((levelData) => (
+                                        <tr key={`level-${levelData.level}`} className="border-b border-gray-700">
+                                          <td className="py-2 px-3">
+                                            <span className={`${getLevelColor(levelData.level)} text-white text-xs px-2 py-1 rounded`}>
+                                              Level {levelData.level}
+                                            </span>
+                                          </td>
+                                          <td className="py-2 px-3">{levelData.totalTrades}</td>
+                                          <td className="py-2 px-3 text-green-500">{levelData.buyOrders}</td>
+                                          <td className="py-2 px-3 text-red-500">{levelData.sellOrders}</td>
+                                          <td className="py-2 px-3">₹{levelData.avgBuyPrice?.toFixed(2) || '0.00'}</td>
+                                          <td className="py-2 px-3">₹{levelData.avgSellPrice?.toFixed(2) || '0.00'}</td>
+                                          <td className="py-2 px-3">{levelData.totalBuyQuantity}</td>
+                                          <td className="py-2 px-3">{levelData.totalSellQuantity}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                              
+                              {/* Level-based trading performance chart */}
+                              <div className="mt-4 bg-gray-800 p-4 rounded-lg">
+                                <h5 className="text-gray-400 mb-3">Level-based Trading Intensity</h5>
+                                <div className="h-40 flex items-end justify-around">
+                                  {levelActions[result.id].map((levelData) => (
+                                    <div key={`bar-${levelData.level}`} className="flex flex-col items-center">
+                                      <div 
+                                        className={`${getLevelColor(levelData.level)} w-12`}
+                                        style={{ height: `${Math.min(100, (levelData.totalTrades / Math.max(...levelActions[result.id].map(d => d.totalTrades))) * 100)}%` }}
+                                      ></div>
+                                      <span className="mt-2 text-xs">Level {levelData.level}</span>
+                                      <span className="text-xs text-gray-400">{levelData.totalTrades}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
