@@ -367,28 +367,24 @@ const Leaderboard: React.FC = () => {
     try {
       setLoadingReport(prev => ({ ...prev, [result.id]: true }));
       
-      // First check if there's already a personality report in the database
-      if (result.game_session?.personality_report) {
-        try {
-          // Try to parse it as a markdown format first
-          const existingReport = result.game_session.personality_report;
-          
-          // If it already has our format, use it directly
-          if (existingReport.includes('Trading Bias Analysis') || 
-              existingReport.includes('Confirmation Bias') || 
-              existingReport.includes('Anchoring')) {
-            
-            setPersonalityReports(prev => ({ ...prev, [result.id]: existingReport }));
-            return existingReport;
-          }
-        } catch (e) {
-          console.error('Error processing existing report:', e);
-        }
+      // Check if we already have the report
+      if (personalityReports[result.id]) {
+        return personalityReports[result.id];
       }
       
-      // Parse trading history if it exists
-      let tradingActions = [];
-      if (result.game_session?.trading_history) {
+      console.log('Generating personality report for player', result.id);
+      
+      // First try to get actions from game_action table
+      let tradingActions: any[] = [];
+      
+      // Priority 1: Use game_action data if available
+      if (gameActions[result.id] && gameActions[result.id].length > 0) {
+        console.log('Using game_action data for personality analysis');
+        tradingActions = gameActions[result.id];
+      } 
+      // Priority 2: Look in the session's trading_history if stored
+      else if (result.game_session?.trading_history) {
+        console.log('Using trading_history from game_session');
         try {
           tradingActions = typeof result.game_session.trading_history === 'string' 
             ? JSON.parse(result.game_session.trading_history)
@@ -397,15 +393,69 @@ const Leaderboard: React.FC = () => {
           console.error('Error parsing trading history:', e);
         }
       }
+      // Priority 3: Fetch from the game_action table if not yet loaded
+      else {
+        console.log('Trying to fetch trading actions from game_action table');
+        
+        // Try to get session_id from various sources
+        let sessionId = '';
+        
+        // Check if it's in the result object directly
+        if (result.session_id) {
+          sessionId = result.session_id;
+        } 
+        // Check if it's in the game_session object
+        else if (result.game_session?.id) {
+          sessionId = result.game_session.id;
+        } 
+        // If not found, try to fetch it from the game_results table
+        else {
+          console.log('Fetching session_id from game_results table for result ID:', result.id);
+          const { data: resultData, error } = await supabase
+            .from('game_results')
+            .select('session_id')
+            .eq('id', result.id)
+            .single();
+            
+          if (resultData?.session_id) {
+            sessionId = resultData.session_id;
+          }
+        }
+        
+        // Try to fetch actions if we found a session ID
+        if (sessionId) {
+          const actions = await fetchTradingHistory(sessionId, result.id);
+          
+          if (actions && actions.length > 0) {
+            console.log(`Loaded ${actions.length} actions from game_action table`);
+            tradingActions = actions;
+            // Also update the gameActions state for future use
+            setGameActions(prev => ({ ...prev, [result.id]: actions }));
+          }
+        } else {
+          // Try with result ID only
+          const actionsByResult = await fetchTradingHistory('', result.id);
+          
+          if (actionsByResult && actionsByResult.length > 0) {
+            console.log(`Loaded ${actionsByResult.length} actions using result_id only`);
+            tradingActions = actionsByResult;
+            // Also update the gameActions state for future use
+            setGameActions(prev => ({ ...prev, [result.id]: actionsByResult }));
+          }
+        }
+      }
       
-      // If no trading history or empty array, create default analysis
+      // If no trading actions, create default analysis
       if (!tradingActions || tradingActions.length === 0) {
+        console.log('No trading actions found, creating default report');
         const defaultReport = generateDefaultReport(result);
         setPersonalityReports(prev => ({ ...prev, [result.id]: defaultReport }));
         return defaultReport;
       }
       
-      // Generate the report using GROQ
+      console.log(`Generating GROQ analysis based on ${tradingActions.length} actions`);
+      
+      // Generate the report using GROQ with trading actions
       const report = await generatePersonalityReport(tradingActions);
       
       // Save it to state
@@ -1122,72 +1172,123 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                             <span className="ml-3 text-gray-300">Generating analysis...</span>
                           </div>
                         ) : personalityReports[result.id] ? (
-                          <div className="space-y-4 max-h-80 overflow-y-auto">
+                          <div className="space-y-4 max-h-96 overflow-y-auto">
                             {personalityReports[result.id].includes('# Trading Bias Analysis') ? (
                               <>
-                                {/* Handle markdown format from GROQ or local analysis */}
-                                {personalityReports[result.id].split('##').slice(1).map((section, i) => {
-                                  if (!section.trim()) return null;
-                                  
-                                  const title = section.split('\n')[0].trim();
-                                  const content = section.split('\n').slice(1).join('\n').trim();
-                                  
-                                  return (
-                                    <div key={i} className="bg-gray-800 p-3 rounded-md">
-                                      <div className="flex items-center gap-2 mb-2">
-                                        {getBiasIcon(title)}
-                                        <h5 className="font-semibold text-blue-300">{title}</h5>
-                                      </div>
-                                      <p className="text-gray-300 text-sm whitespace-pre-wrap">{content}</p>
-                                    </div>
-                                  );
-                                })}
-                              </>
-                            ) : (
-                              <div className="max-h-64 overflow-y-auto">
-                                {tradingActions[result.id]?.length > 0 ? (
-                                  <div className="space-y-4">
-                                    {/* Group actions by level */}
-                                    {[...new Set(tradingActions[result.id].map(a => a.level || 0))]
-                                      .sort((a, b) => a - b)
-                                      .map(level => (
-                                        <div key={`level-${level}`} className="mb-4">
-                                          <div className="flex items-center gap-2 mb-2">
-                                            <span className={`${getLevelColor(level)} text-white text-xs px-2 py-1 rounded`}>
-                                              Level {level || 1}
-                                            </span>
-                                            <span className="text-sm text-gray-400">
-                                              {tradingStats[result.id]?.levelStats?.[level]?.totalTrades || 0} actions
-                                            </span>
-                                          </div>
-                                          <div className="space-y-2">
-                                            {tradingActions[result.id]
-                                              .filter(action => (action.level || 0) === level)
-                                              .map((action, index) => (
-                                                <div key={index} className="bg-gray-800 p-2 rounded flex items-center justify-between">
-                                                  <div className="flex items-center gap-2">
-                                                    {getActionIcon(action.action)}
-                                                    <span className="font-medium">{action.action.toUpperCase()}</span>
-                                                    <span className="text-gray-400">{action.stock_name}</span>
-                                                  </div>
-                                                  <div className="flex items-center gap-4">
-                                                    <span>{action.quantity} shares</span>
-                                                    <span className="font-semibold">₹{action.price?.toFixed(2)}</span>
-                                                  </div>
-                                                </div>
-                                              ))
-                                            }
-                                          </div>
-                                        </div>
-                                      ))
+                                {/* Parse and display markdown with enhanced styling */}
+                                <div className="mb-4">
+                                  <h3 className="text-lg font-bold text-white">Trading Bias Analysis</h3>
+                                  <p className="text-gray-400 text-sm mb-4">
+                                    Analysis based on {gameActions[result.id]?.length || 0} trading actions across multiple levels
+                                  </p>
+                                </div>
+                                
+                                {/* Regular Biases Section */}
+                                <div className="mb-6">
+                                  {personalityReports[result.id].split('##').slice(1).map((section, i) => {
+                                    if (!section.trim()) return null;
+                                    
+                                    // Skip Level-Specific Analysis section as we'll display it differently
+                                    if (section.includes('Level-Specific Analysis')) return null;
+                                    
+                                    const title = section.split('\n')[0].trim();
+                                    let content = section.split('\n').slice(1).join('\n').trim();
+                                    
+                                    // Extract bias rating if present
+                                    let biasRating = '';
+                                    if (content.includes('**Bias Strength:**')) {
+                                      const ratingMatch = content.match(/\*\*Bias Strength:\*\* (Low|Moderate|High)/);
+                                      if (ratingMatch) {
+                                        biasRating = ratingMatch[1];
+                                        // Remove the bias strength line from content
+                                        content = content.replace(/\*\*Bias Strength:\*\* (Low|Moderate|High)/, '').trim();
+                                      }
                                     }
-                                  </div>
-                                ) : (
-                                  <div className="text-center py-6 text-gray-400">
-                                    <BarChart className="mx-auto mb-2 opacity-50" size={32} />
-                                    <p>No trading activity recorded</p>
+                                    
+                                    // Get color based on bias rating
+                                    const ratingColor = biasRating === 'Low' 
+                                      ? 'bg-green-600' 
+                                      : biasRating === 'Moderate' 
+                                        ? 'bg-yellow-500' 
+                                        : 'bg-red-500';
+                                    
+                                    return (
+                                      <div key={i} className="bg-gray-800 p-4 rounded-md mb-3">
+                                        <div className="flex items-center justify-between mb-3">
+                                          <div className="flex items-center gap-2">
+                                            {getBiasIcon(title)}
+                                            <h5 className="font-semibold text-blue-300">{title}</h5>
+                                          </div>
+                                          {biasRating && (
+                                            <span className={`text-xs font-medium px-2 py-1 rounded ${ratingColor}`}>
+                                              {biasRating}
+                                            </span>
+                                          )}
+                                        </div>
+                                        <p className="text-gray-300 text-sm whitespace-pre-wrap">{content}</p>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                
+                                {/* Level-Specific Analysis Section */}
+                                {personalityReports[result.id].includes('# Level-Specific Analysis') && (
+                                  <div className="mt-6">
+                                    <h3 className="text-lg font-bold text-white mb-4">Level-Specific Analysis</h3>
+                                    
+                                    {/* Extract and display each level's analysis */}
+                                    {personalityReports[result.id]
+                                      .split('# Level-Specific Analysis')[1]
+                                      .split('##')
+                                      .slice(1)
+                                      .map((levelSection, i) => {
+                                        if (!levelSection.trim()) return null;
+                                        
+                                        const levelTitle = levelSection.split('\n')[0].trim();
+                                        const levelContent = levelSection.split('\n').slice(1).join('\n').trim();
+                                        const levelNum = levelTitle.match(/Level (\d+)/)?.[1] || '0';
+                                        
+                                        return (
+                                          <div key={i} className={`mb-4 p-4 rounded-md bg-gray-800 border-l-4 ${getLevelColor(Number(levelNum))}`}>
+                                            <h4 className="font-semibold text-white mb-2">{levelTitle}</h4>
+                                            
+                                            {/* Parse key stats into bullet points if they exist */}
+                                            {levelContent.includes('Activity level:') && (
+                                              <div className="grid grid-cols-2 gap-4 mb-3">
+                                                {levelContent.split('\n')
+                                                  .filter(line => line.includes(':'))
+                                                  .map((stat, j) => {
+                                                    const [label, value] = stat.split(':').map(s => s.trim());
+                                                    if (!value) return null;
+                                                    
+                                                    return (
+                                                      <div key={j} className="flex items-center gap-2">
+                                                        <span className="text-gray-400 text-xs">{label}:</span>
+                                                        <span className="text-white text-sm" 
+                                                              dangerouslySetInnerHTML={{__html: value.replace(/\*\*/g, '')}} />
+                                                      </div>
+                                                    );
+                                                  })
+                                                }
+                                              </div>
+                                            )}
+                                            
+                                            {/* Display the rest of the content */}
+                                            <p className="text-gray-300 text-sm whitespace-pre-wrap">
+                                              {levelContent.split('\n')
+                                                .filter(line => !line.includes(':'))
+                                                .join('\n')}
+                                            </p>
+                                          </div>
+                                        );
+                                      })}
                                   </div>
                                 )}
+                              </>
+                            ) : (
+                              // Fallback for non-markdown format
+                              <div className="text-gray-300 whitespace-pre-wrap">
+                                {personalityReports[result.id]}
                               </div>
                             )}
                           </div>
@@ -1195,8 +1296,9 @@ Note: This is a preliminary analysis based on limited trading data. More active 
                           <div className="flex items-center justify-center py-4">
                             <button 
                               onClick={() => loadPersonalityReport(result)}
-                              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded"
+                              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded flex items-center gap-2"
                             >
+                              <FileText size={16} />
                               Generate Personality Analysis
                             </button>
                           </div>

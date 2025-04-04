@@ -200,18 +200,18 @@ export const useGameStore = create<GameState>((set, get) => ({
         return stock;
       }
 
-      // When advancing to a new level, add the new price to the history
-      // but don't reset the history array
+      // When advancing to a new level, update the previousPrice
+      // This is the appropriate time to update the baseline
       return {
         ...stock,
-        previousPrice: stock.price,
+        previousPrice: stock.price, // Update baseline price on level change
         price: levelStock.price,
         // Add new price to existing history instead of creating a new array
         history: [...stock.history, levelStock.price],
       };
     });
 
-    // Update performance metrics
+    // Update performance metrics with freshly calculated changes
     const updatedPerformance = updatedStocks.map(stock => ({
       name: stock.name,
       change: Number(((stock.price - stock.previousPrice) / stock.previousPrice * 100).toFixed(1)),
@@ -274,7 +274,8 @@ export const useGameStore = create<GameState>((set, get) => ({
                 
                 return {
                   ...stock,
-                  previousPrice: stock.price,
+                  // Keep the previousPrice stable to maintain consistent gain/loss calculations
+                  // Only update the current price
                   price: newPrice,
                   history: currentHistory
                 };
@@ -282,7 +283,8 @@ export const useGameStore = create<GameState>((set, get) => ({
                 // Normal case - just add to history
             return {
               ...stock,
-              previousPrice: stock.price,
+              // Keep the previousPrice stable to maintain consistent gain/loss calculations
+              // Only update the current price
               price: newPrice,
               history: [...stock.history, newPrice],
             };
@@ -324,9 +326,10 @@ export const useGameStore = create<GameState>((set, get) => ({
           
         return {
           ...stock,
-          previousPrice: stock.price,
+          // Don't update previousPrice on regular updates, only on level changes
+          // This maintains stable gain/loss calculations
           price: newPrice,
-            history: currentHistory
+          history: currentHistory
         };
       }
       return stock;
