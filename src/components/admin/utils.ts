@@ -3,7 +3,7 @@ import { GameResult } from './types';
 // Helper function to safely extract user info
 export const safeUserExtract = (user: GameResult['user']) => {
   return {
-    name: user?.name || 'Unknown Player',
+    name: user?.name || '',
     email: user?.email || ''
   };
 };

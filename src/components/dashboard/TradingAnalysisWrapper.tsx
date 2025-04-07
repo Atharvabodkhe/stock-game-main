@@ -65,15 +65,43 @@ const TradingAnalysisWrapper: React.FC<TradingAnalysisWrapperProps> = ({ actions
     
     console.log("Final formatted actions:", formattedActions);
     
-    // Make sure finalBalance is a number
-    const finalBalanceNum = typeof finalBalance === 'number' ? finalBalance : 10000;
+    // Calculate the final balance based on the transaction history
+    let calculatedFinalBalance = 10000; // Start with initial balance
     
-    console.log("Final balance:", finalBalanceNum);
+    if (formattedActions.length > 0) {
+      // Sort actions by timestamp to ensure correct calculation
+      const sortedActions = [...formattedActions].sort((a, b) => {
+        try {
+          return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+        } catch (e) {
+          return 0;
+        }
+      });
+      
+      // Calculate running balance
+      for (const action of sortedActions) {
+        const actionType = action.action.toLowerCase();
+        const cost = action.price * action.quantity;
+        
+        if (actionType === 'buy') {
+          calculatedFinalBalance -= cost;
+        } else if (actionType === 'sell') {
+          calculatedFinalBalance += cost;
+        }
+      }
+      
+      console.log("Calculated final balance from actions:", calculatedFinalBalance);
+    }
+    
+    // Use the calculated balance from actions for consistency
+    const finalBalanceToUse = calculatedFinalBalance;
+    
+    console.log("Final balance to use:", finalBalanceToUse);
           
     return (
       <TradingAnalysis 
         actions={formattedActions}
-        finalBalance={finalBalanceNum}
+        finalBalance={finalBalanceToUse}
       />
     );
   } catch (error) {

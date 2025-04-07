@@ -1,4 +1,3 @@
-
 import { useNavigate, useLocation } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { useGameStore } from '../store/gameStore';
@@ -30,6 +29,60 @@ const PauseOverlay = () => (
     </div>
   </div>
 );
+
+// Add this new component above the Game function
+const FinalBalanceDisplay = ({ sessionId }: { sessionId: string | null }) => {
+  const [dbBalance, setDbBalance] = useState<number | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  
+  useEffect(() => {
+    if (!sessionId) {
+      setIsLoading(false);
+      return;
+    }
+    
+    const fetchBalanceFromDb = async () => {
+      try {
+        setIsLoading(true);
+        
+        // Direct query to get final_balance from game_sessions table
+        const { data, error } = await supabase
+          .from('game_sessions')
+          .select('final_balance')
+          .eq('id', sessionId)
+          .single();
+          
+        if (error) {
+          console.error('Error fetching balance from database:', error);
+          setDbBalance(10000); // Fallback to initial balance
+        } else if (data) {
+          console.log('✅ Retrieved final balance from database:', data.final_balance);
+          setDbBalance(data.final_balance);
+          
+          // Also store in localStorage as backup
+          localStorage.setItem('final_game_balance', data.final_balance.toString());
+        }
+      } catch (err) {
+        console.error('Exception fetching balance:', err);
+        setDbBalance(10000); // Fallback to initial balance
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    
+    fetchBalanceFromDb();
+  }, [sessionId]);
+  
+  if (isLoading) {
+    return <span className="text-gray-400 font-bold">Loading balance...</span>;
+  }
+  
+  return (
+    <span className="text-green-500 font-bold">
+      ₹{(dbBalance || 10000).toFixed(2)}
+    </span>
+  );
+};
 
 function Game() {
   const navigate = useNavigate();
@@ -577,7 +630,6 @@ function Game() {
     try {
       setError(null);
       
-      let amount = 0;
       let transactionPrice = price;
       const quantity = stockQuantities[stockName] || 1;
       
@@ -587,7 +639,7 @@ function Game() {
           setError(`Insufficient funds. You need ₹${totalCost.toFixed(2)} to buy ${quantity} shares of ${stockName}.`);
           return;
         }
-        amount = -totalCost;
+        // Balance is already updated in the buyStock function
         transactionPrice = totalCost / quantity;
       } else if (action === 'sell') {
         if (getStockQuantity(stockName) < quantity) {
@@ -596,12 +648,9 @@ function Game() {
         }
         
         const saleValue = sellStock(stockName, quantity);
-        amount = saleValue;
+        // Balance is already updated in the sellStock function
         transactionPrice = saleValue / quantity;
       }
-      
-      // We'll update the local balance state after DB update to ensure consistency
-      const localBalanceToUpdate = balance + amount;
       
       const actionData = {
         level: currentLevel + 1, // Store the displayed level (1-based) instead of the index (0-based)
@@ -1061,14 +1110,13 @@ function Game() {
           }
         }
         
-        // Calculate the new balance for database update
-        const newBalance = balance + amount;
-        console.log(`Updating session ${sessionId} balance from ${balance} to ${newBalance}`);
+        // We don't need to update balance here anymore as it's handled in buyStock/sellStock
+        console.log(`Current session ${sessionId} balance is ${balance}`);
         
-        // Update the session with the new balance
+        // Update the session with the current balance
         const { error: sessionError } = await supabase
           .from('game_sessions')
-          .update({ final_balance: newBalance })
+          .update({ final_balance: balance })
           .eq('id', sessionId);
           
         if (sessionError) {
@@ -1079,7 +1127,7 @@ function Game() {
             const { data: forcedResult, error: forcedError } = await supabase
               .rpc('force_update_balance', {
                 session_id_param: sessionId,
-                new_balance_param: newBalance
+                new_balance_param: balance
               });
               
             if (forcedError) {
@@ -1106,14 +1154,14 @@ function Game() {
               console.log(`Database balance after update: ${storedBalance}`);
               
               // Check if the update didn't actually take effect
-              if (Math.abs(storedBalance - newBalance) > 0.01) {
-                console.warn(`Balance verification failed. Expected: ${newBalance}, Got: ${storedBalance}`);
+              if (Math.abs(storedBalance - balance) > 0.01) {
+                console.warn(`Balance verification failed. Expected: ${balance}, Got: ${storedBalance}`);
                 
                 // Try direct SQL update as fallback
                 const { data: forcedResult, error: forcedError } = await supabase
                   .rpc('force_update_balance', {
                     session_id_param: sessionId,
-                    new_balance_param: newBalance
+                    new_balance_param: balance
                   });
                   
                 if (forcedError) {
@@ -1128,13 +1176,10 @@ function Game() {
           } catch (verifyErr) {
             console.error('Error verifying balance update:', verifyErr);
           }
-          
-          // Update local balance state AFTER successful DB update
-          updateBalance(amount);
         }
       } else {
-        // If no session ID, just update the local state
-        updateBalance(amount);
+        // If no session ID, no need to update balance as it's handled in buyStock/sellStock
+        console.log("No session ID found, balance already updated in store functions");
       }
       
     } catch (error) {
@@ -1142,6 +1187,40 @@ function Game() {
       setError('Error processing action. Please try again.');
     }
   };
+
+  // Calculate final balance based on actions
+  const calculateFinalBalanceFromActions = useCallback(() => {
+    if (!gameActions || gameActions.length === 0) {
+      return 10000; // Default starting balance
+    }
+    
+    // Sort actions by timestamp
+    const sortedActions = [...gameActions].sort((a, b) => {
+      try {
+        return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+      } catch (e) {
+        return 0;
+      }
+    });
+    
+    // Calculate running balance
+    let runningBalance = 10000; // Starting balance
+    
+    for (const action of sortedActions) {
+      const actionType = action.action.toLowerCase();
+      const price = action.price;
+      const quantity = action.quantity || 1;
+      const cost = price * quantity;
+      
+      if (actionType === 'buy') {
+        runningBalance -= cost;
+      } else if (actionType === 'sell') {
+        runningBalance += cost;
+      }
+    }
+    
+    return runningBalance;
+  }, [gameActions]);
 
   const handleGameCompletion = async () => {
     if (completionProcessStarted) {
@@ -1168,10 +1247,16 @@ function Game() {
       return;
     }
 
-    // Store the final balance before completing the game
-    const finalBalance = balance;
+    // Calculate final balance from actions
+    const finalBalance = calculateFinalBalanceFromActions();
     localStorage.setItem('final_game_balance', finalBalance.toString());
-    console.log(`Game completion with final balance: ${finalBalance.toFixed(2)}`);
+    console.log(`Game completion with calculated final balance: ${finalBalance.toFixed(2)}`);
+
+    // Update local balance state if different from calculated
+    if (Math.abs(finalBalance - balance) > 0.01) {
+      console.log(`Adjusting balance from ${balance} to calculated ${finalBalance}`);
+      updateBalance(finalBalance - balance);
+    }
 
     const forceCompletionTimeout = setTimeout(() => {
       console.log('Force completion screen after delay');
@@ -2047,6 +2132,21 @@ function Game() {
     }
   };
 
+  useEffect(() => {
+    if (sessionId) {
+      const savedCompletion = localStorage.getItem(`game_completed_${sessionId}`);
+      if (savedCompletion === 'true') {
+        console.log('Found saved completion state in localStorage, restoring...');
+        setGameCompleted(true);
+        setShowCompletionScreen(true);
+        setLoadingWithDebounce(false);
+      }
+    }
+  }, [sessionId, setGameCompleted, setLoadingWithDebounce]);
+
+  const shouldShowCompletionScreen = showCompletionScreen || 
+    (gameCompleted && sessionId && localStorage.getItem(`game_completed_${sessionId}`) === 'true');
+
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
       const price = payload[0].value;
@@ -2067,10 +2167,69 @@ function Game() {
     setLoadingWithDebounce(true);
     setGameCompleted(true);
     
-    // Store the final balance before completing the game
-    const finalBalance = balance;
+    // Force a thorough calculation of final balance
+    let finalBalance = 10000; // Default starting balance
+    
+    try {
+      // Try to calculate from gameActions first (most accurate)
+      if (gameActions && gameActions.length > 0) {
+        // Use the main calculation function
+        finalBalance = calculateFinalBalanceFromActions();
+        console.log('✅ Calculated final balance from game actions:', finalBalance);
+      } else {
+        // Try to load from localStorage backup as fallback
+        console.log('⚠️ No game actions available, trying localStorage backup');
+        const backupActions = JSON.parse(localStorage.getItem('game_action_backup') || '[]');
+        
+        if (backupActions && backupActions.length > 0) {
+          console.log(`Found ${backupActions.length} backup actions in localStorage`);
+          
+          // Sort by timestamp
+          const sortedActions = [...backupActions].sort((a, b) => {
+            try {
+              return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+            } catch (e) {
+              return 0;
+            }
+          });
+          
+          // Calculate balance from backup
+          let runningBalance = 10000;
+          for (const action of sortedActions) {
+            const actionType = (action.action_type || action.action || '').toLowerCase();
+            const price = action.price || 0;
+            const quantity = action.quantity || 1;
+            const cost = price * quantity;
+            
+            if (actionType === 'buy') {
+              runningBalance -= cost;
+            } else if (actionType === 'sell') {
+              runningBalance += cost;
+            }
+          }
+          
+          finalBalance = runningBalance;
+          console.log('✅ Calculated final balance from backup actions:', finalBalance);
+        } else {
+          // If all else fails, use current balance
+          finalBalance = balance;
+          console.log('⚠️ Using current balance state as fallback:', finalBalance);
+        }
+      }
+    } catch (err) {
+      console.error('Error calculating final balance in handleCompleteGame:', err);
+      finalBalance = balance; // Fallback to current balance
+    }
+    
+    // Store the CALCULATED balance, not just the current balance
     localStorage.setItem('final_game_balance', finalBalance.toString());
-    console.log(`Complete Game button clicked. Final balance: ${finalBalance}`);
+    console.log(`Complete Game button clicked. FINAL calculated balance: ${finalBalance}`);
+    
+    // Update local balance state if different from calculated
+    if (Math.abs(finalBalance - balance) > 0.01) {
+      console.log(`Adjusting balance from ${balance} to ${finalBalance}`);
+      updateBalance(finalBalance - balance);
+    }
     
     // Set localStorage to indicate game is completed
     if (sessionId) {
@@ -2084,38 +2243,102 @@ function Game() {
     if (sessionId) {
       (async () => {
         try {
-          // First get the current session data
-          const { data: currentSession, error: checkError } = await supabase
-            .from('game_sessions')
-            .select('final_balance')
-            .eq('id', sessionId)
-            .single();
-            
-          if (checkError) {
-            console.error('Error checking session data in handleCompleteGame:', checkError);
-          } else if (currentSession) {
-            console.log(`Current database balance: ${currentSession.final_balance}, Final balance: ${finalBalance}`);
-            
-            if (currentSession.final_balance !== finalBalance) {
-              console.log(`CRITICAL: Updating final balance from ${currentSession.final_balance} to ${finalBalance}`);
-              
-              // Update the session with the correct final balance
-              const { error: updateError } = await supabase
+          console.log('CRITICAL DATABASE UPDATE: Storing final balance in database:', finalBalance);
+          
+          // Aggressive multi-method approach to ensure database is updated
+          
+          // 1. Direct update to game_sessions
+          const { error: directError } = await supabase
                 .from('game_sessions')
                 .update({ final_balance: finalBalance })
                 .eq('id', sessionId);
                 
-              if (updateError) {
-                console.error('Error updating final balance in handleCompleteGame:', updateError);
+          if (directError) {
+            console.error('Error in direct database update:', directError);
               } else {
-                console.log('Successfully updated final balance in handleCompleteGame');
-              }
+            console.log('✅ Successfully updated game_sessions directly');
+          }
+          
+          // 2. Use RPC function
+          const { error: rpcError } = await supabase.rpc('force_update_balance', {
+            session_id_param: sessionId,
+            new_balance_param: finalBalance
+          });
+          
+          if (rpcError) {
+            console.error('Error in RPC update:', rpcError);
             } else {
-              console.log('Session already has correct final balance');
+            console.log('✅ Successfully updated via RPC function');
+          }
+          
+          // 3. Direct SQL approach
+          const sqlQuery = `
+            UPDATE public.game_sessions 
+            SET final_balance = ${finalBalance}
+            WHERE id = '${sessionId}';
+
+            UPDATE public.game_results
+            SET final_balance = ${finalBalance}
+            WHERE session_id = '${sessionId}';
+          `;
+          
+          const { error: sqlError } = await supabase.rpc('exec_sql', { sql: sqlQuery });
+          
+          if (sqlError) {
+            console.error('Error in SQL direct update:', sqlError);
+          } else {
+            console.log('✅ Successfully updated via direct SQL');
+          }
+          
+          // 4. Update game_results table
+          try {
+            const { data: { user } } = await supabase.auth.getUser();
+            
+            if (user) {
+              // Check if there's an existing result
+              const { data: resultData, error: getResultError } = await supabase
+                .from('game_results')
+                .select('id')
+                .eq('session_id', sessionId)
+                .maybeSingle();
+                
+              if (getResultError) {
+                console.error('Error checking for game result:', getResultError);
+              } else if (resultData) {
+                // Update existing result
+                const { error: updateResultError } = await supabase
+                  .from('game_results')
+                  .update({ final_balance: finalBalance })
+                  .eq('id', resultData.id);
+                  
+                if (updateResultError) {
+                  console.error('Error updating game result:', updateResultError);
+                } else {
+                  console.log('✅ Successfully updated game_results record');
+                }
+              } else {
+                // Create new result
+                const { error: insertError } = await supabase
+                  .from('game_results')
+                  .insert({
+                    session_id: sessionId,
+                    user_id: user.id,
+                    room_id: roomId,
+                    final_balance: finalBalance
+                  });
+                  
+                if (insertError) {
+                  console.error('Error creating game result:', insertError);
+                } else {
+                  console.log('✅ Successfully created game_results record');
+                }
+              }
             }
+          } catch (err) {
+            console.error('Error updating game_results:', err);
           }
         } catch (error) {
-          console.error('Exception in handleCompleteGame balance update:', error);
+          console.error('Exception in database updates:', error);
         }
       })();
     }
@@ -2288,36 +2511,23 @@ function Game() {
       setLoadingWithDebounce(false);
       setShowCompletionScreen(true);
     }, 500);
-  }, [setGameCompleted, setLoadingWithDebounce, roomId, roomPlayerId, sessionId, navigate, supabase]);
-
-  useEffect(() => {
-    if (sessionId) {
-      const savedCompletion = localStorage.getItem(`game_completed_${sessionId}`);
-      if (savedCompletion === 'true') {
-        console.log('Found saved completion state in localStorage, restoring...');
-        setGameCompleted(true);
-        setShowCompletionScreen(true);
-        setLoadingWithDebounce(false);
-      }
-    }
-  }, [sessionId, setGameCompleted, setLoadingWithDebounce]);
-
-  const shouldShowCompletionScreen = showCompletionScreen || 
-    (gameCompleted && sessionId && localStorage.getItem(`game_completed_${sessionId}`) === 'true');
+  }, [sessionId, supabase, roomId, roomPlayerId, navigate, setGameCompleted, setLoadingWithDebounce, calculateFinalBalanceFromActions, balance, updateBalance]);
 
   // Add effect to restore final balance when showing completion screen
   useEffect(() => {
     if (shouldShowCompletionScreen) {
-      const storedBalance = localStorage.getItem('final_game_balance');
-      if (storedBalance) {
-        const finalBalance = parseFloat(storedBalance);
-        if (!isNaN(finalBalance)) {
-          // Update local balance state
-          updateBalance(finalBalance - balance);
-          
-          // Also ensure the database is updated with the final balance
+      // Calculate the correct final balance from actions
+      const calculatedBalance = calculateFinalBalanceFromActions();
+      
+      // Update local balance state if different
+      if (Math.abs(calculatedBalance - balance) > 0.01) {
+        console.log(`Adjusting balance from ${balance} to calculated ${calculatedBalance}`);
+        updateBalance(calculatedBalance - balance);
+      }
+      
+      // Also ensure the database is updated with the correct final balance
           if (sessionId) {
-            console.log(`CRITICAL: Forcing final balance update in database for session ${sessionId}: ${finalBalance}`);
+        console.log(`CRITICAL: Forcing final balance update in database for session ${sessionId}: ${calculatedBalance}`);
             (async () => {
               try {
                 // Get current session data first to verify
@@ -2330,71 +2540,77 @@ function Game() {
                 if (checkError) {
                   console.error('Error checking current session balance:', checkError);
                 } else if (currentSession) {
-                  console.log(`Current database balance: ${currentSession.final_balance}, Final balance: ${finalBalance}`);
+              console.log(`Current database balance: ${currentSession.final_balance}, Calculated balance: ${calculatedBalance}`);
                   
-                  // Check if the balance in the database matches the one we expect
-                  // Use Math.abs to handle potential floating point comparison issues
-                  const balanceMismatch = Math.abs(currentSession.final_balance - finalBalance) > 0.01;
+              // Check if the balance in the database matches the calculated one
+              const balanceMismatch = Math.abs(currentSession.final_balance - calculatedBalance) > 0.01;
                   
                   // Only update if needed
                   if (balanceMismatch) {
                     // Force update the final balance in the database
                     const { error: updateError } = await supabase
                       .from('game_sessions')
-                      .update({ final_balance: finalBalance })
+                  .update({ final_balance: calculatedBalance })
                       .eq('id', sessionId);
                       
                     if (updateError) {
-                      console.error('Error updating final balance in database:', updateError);
+                  console.error('Error updating session balance to calculated value:', updateError);
                     } else {
-                      console.log('Successfully force-updated final balance in database');
+                  console.log('Successfully updated session balance to calculated value:', calculatedBalance);
                       
-                      // Also update in game_results as a backup
+                  // Store the calculated balance
+                  localStorage.setItem('final_game_balance', calculatedBalance.toString());
+
+                  // Also update the game result if it exists
                       const { data: { user } } = await supabase.auth.getUser();
+                  
                       if (user) {
-                        // First check if there's an existing result
-                        const { data: existingResult } = await supabase
+                    // Check if there's an existing result
+                    const { data: existingResult, error: resultError } = await supabase
                           .from('game_results')
                           .select('id')
                           .eq('session_id', sessionId)
                           .eq('user_id', user.id)
                           .maybeSingle();
                           
+                    if (resultError) {
+                      console.error('Error checking for existing game result:', resultError);
+                    } else {
                         if (existingResult) {
                           // Update existing result
-                          const { error: resultError } = await supabase
+                        const { error: resultUpdateError } = await supabase
                             .from('game_results')
-                            .update({ final_balance: finalBalance })
-                            .eq('session_id', sessionId)
-                            .eq('user_id', user.id);
+                          .update({ final_balance: calculatedBalance })
+                          .eq('id', existingResult.id);
                             
-                          if (resultError) {
-                            console.error('Error updating game result balance:', resultError);
+                        if (resultUpdateError) {
+                          console.error('Error updating game result balance to calculated value:', resultUpdateError);
                           } else {
-                            console.log('Successfully updated game result balance');
+                          console.log('Successfully updated game result balance to calculated value');
                           }
                         } else {
                           // Create new result if none exists
-                          console.log('No existing game result found, creating one');
+                        console.log('No existing game result found, creating one with calculated balance');
                           const { error: insertError } = await supabase
                             .from('game_results')
                             .insert([{
                               session_id: sessionId,
                               user_id: user.id,
-                              final_balance: finalBalance,
+                            final_balance: calculatedBalance,
                               room_id: roomId
                             }]);
                             
                           if (insertError) {
-                            console.error('Error creating new game result:', insertError);
+                          console.error('Error creating new game result with calculated balance:', insertError);
                           } else {
-                            console.log('Successfully created new game result with correct balance');
+                          console.log('Successfully created new game result with calculated balance');
+                        }
                           }
                         }
                       }
                     }
                   } else {
-                    console.log('Database already has correct final balance');
+                console.log('Database already has correct calculated final balance');
                   }
                 }
               } catch (error) {
@@ -2403,9 +2619,7 @@ function Game() {
             })();
           }
         }
-      }
-    }
-  }, [shouldShowCompletionScreen, balance, updateBalance, sessionId, supabase, roomId]);
+  }, [shouldShowCompletionScreen, calculateFinalBalanceFromActions, balance, updateBalance, sessionId, supabase, roomId]);
 
   useEffect(() => {
     fetchInitialData();
@@ -2607,51 +2821,139 @@ function Game() {
         setIsBalanceLoading(true);
         
         try {
-          console.log('Fetching verified final balance from database...');
+          console.log('Fetching and enforcing correct final balance...');
           
-          // First try the game_sessions table
-          const { data: sessionData, error: sessionError } = await supabase
-            .from('game_sessions')
-            .select('final_balance')
-            .eq('id', sessionId)
-            .single();
-            
-          if (sessionError) {
-            console.error('Error fetching from game_sessions:', sessionError);
-          } else if (sessionData && isMounted) {
-            console.log('✅ Found balance in game_sessions:', sessionData.final_balance);
-            
-            // We found a balance in the sessions table
-            let dbBalance = sessionData.final_balance;
-            
-            // If the database still has the default value (10000) but our local state has changed,
-            // force an update to the database
-            if (Math.abs(dbBalance - 10000) < 0.01 && Math.abs(balance - 10000) > 0.01) {
-              console.log('Database shows default value. Forcing final balance update:', balance);
+          // Calculate the final balance from actions first - THIS IS THE CORRECT VALUE
+          const calculatedBalance = calculateFinalBalanceFromActions();
+          console.log('CORRECT final balance from actions:', calculatedBalance);
+          
+          // CRITICAL: Always update the local balance state to match the calculation
+          if (Math.abs(balance - calculatedBalance) > 0.01) {
+            console.log(`CRITICAL: Fixing local balance from ${balance} to ${calculatedBalance}`);
+            updateBalance(calculatedBalance - balance);
+          }
+          
+          // ENSURE DB IS UPDATED - Try multiple approaches for maximum reliability
+          
+          // 1. Direct update to game_sessions table
+          console.log('DIRECT UPDATE: Updating game_sessions table...');
+          try {
+            const { error: directUpdateError } = await supabase
+              .from('game_sessions')
+              .update({ final_balance: calculatedBalance })
+              .eq('id', sessionId);
               
-              try {
-                const { error: updateError } = await supabase.rpc('force_update_balance', {
+            if (directUpdateError) {
+              console.error('Error in direct session update:', directUpdateError);
+            } else {
+              console.log('✅ Successfully updated game_sessions directly');
+            }
+          } catch (directErr) {
+            console.error('Exception in direct session update:', directErr);
+          }
+          
+          // 2. RPC function approach (more reliable when permissions are tight)
+          console.log('RPC UPDATE: Using force_update_balance function...');
+          try {
+            const { error: rpcError } = await supabase.rpc('force_update_balance', {
                   session_id_param: sessionId,
-                  new_balance_param: balance
+              new_balance_param: calculatedBalance
                 });
                 
-                if (updateError) {
-                  console.error('Force update failed:', updateError);
+            if (rpcError) {
+              console.error('Error in RPC balance update:', rpcError);
                 } else {
-                  console.log('Force update succeeded, using local balance:', balance);
-                  dbBalance = balance;
+              console.log('✅ Successfully updated balance via RPC function');
+            }
+          } catch (rpcErr) {
+            console.error('Exception in RPC balance update:', rpcErr);
+          }
+          
+          // 3. SQL direct approach (most aggressive option)
+          console.log('SQL UPDATE: Using direct SQL approach...');
+          try {
+            const sqlQuery = `
+              UPDATE public.game_sessions 
+              SET final_balance = ${calculatedBalance}
+              WHERE id = '${sessionId}';
+
+              UPDATE public.game_results
+              SET final_balance = ${calculatedBalance}
+              WHERE session_id = '${sessionId}';
+            `;
+            
+            const { error: sqlError } = await supabase.rpc('exec_sql', { 
+              sql: sqlQuery 
+            });
+            
+            if (sqlError) {
+              console.error('Error in SQL direct update:', sqlError);
+            } else {
+              console.log('✅ Successfully updated balance via direct SQL');
+            }
+          } catch (sqlErr) {
+            console.error('Exception in SQL direct update:', sqlErr);
+          }
+          
+          // 4. Update game_results table as well
+          console.log('RESULTS UPDATE: Updating game_results table...');
+          try {
+            const { data: { user } } = await supabase.auth.getUser();
+            
+            if (user) {
+              const { data: resultData, error: getResultError } = await supabase
+                .from('game_results')
+                .select('id')
+                .eq('session_id', sessionId)
+                .maybeSingle();
+                
+              if (getResultError) {
+                console.error('Error getting game result:', getResultError);
+              } else if (resultData) {
+                // Update existing record
+                const { error: updateResultError } = await supabase
+                  .from('game_results')
+                  .update({ final_balance: calculatedBalance })
+                  .eq('id', resultData.id);
+                  
+                if (updateResultError) {
+                  console.error('Error updating game result:', updateResultError);
+                } else {
+                  console.log('✅ Successfully updated game_results record');
                 }
-              } catch (updateErr) {
-                console.error('Exception during force update:', updateErr);
+              } else {
+                // Create a new record
+                console.log('Creating new game_results record...');
+                const { error: insertError } = await supabase
+                  .from('game_results')
+                  .insert({
+                    session_id: sessionId,
+                    user_id: user.id,
+                    room_id: roomId,
+                    final_balance: calculatedBalance
+                  });
+                  
+                if (insertError) {
+                  console.error('Error creating game result:', insertError);
+                } else {
+                  console.log('✅ Successfully created game_results record');
+                }
               }
             }
-            
-            if (isMounted) {
-              setVerifiedFinalBalance(dbBalance);
-            }
+          } catch (resultsErr) {
+            console.error('Exception updating game_results:', resultsErr);
+          }
+          
+          // Store in localStorage as backup
+          localStorage.setItem('final_game_balance', calculatedBalance.toString());
+          
+          // Set verified balance to the calculated value regardless of DB operations
+          if (isMounted) {
+            console.log('Setting verified final balance to:', calculatedBalance);
+            setVerifiedFinalBalance(calculatedBalance);
           }
         } catch (err) {
-          console.error('Error fetching final balance:', err);
+          console.error('Error in fetchFinalBalance:', err);
         } finally {
           if (isMounted) {
             setIsBalanceLoading(false);
@@ -2665,7 +2967,7 @@ function Game() {
         isMounted = false;
       };
     }
-  }, [shouldShowCompletionScreen, sessionId, balance, supabase]);
+  }, [shouldShowCompletionScreen, sessionId, balance, supabase, calculateFinalBalanceFromActions, updateBalance, roomId]);
 
   // Add a useEffect to periodically try to save any backed-up actions
   useEffect(() => {
@@ -2758,6 +3060,7 @@ function Game() {
   };
 
   if (shouldShowCompletionScreen) {
+    // Replace the local calculation with a direct database fetch component
     return (
       <div className="min-h-screen bg-gray-900 text-white flex items-center justify-center p-8">
         <div className="max-w-4xl w-full bg-gray-800 rounded-lg p-8 shadow-lg">
@@ -2765,13 +3068,7 @@ function Game() {
             <h1 className="text-4xl font-bold text-green-500 mb-4">Congratulations!</h1>
             <p className="text-2xl">You've completed the trading game!</p>
             <div className="mt-6 flex items-center justify-center gap-2 text-3xl">
-              {isBalanceLoading ? (
-                <span className="text-green-500 font-bold">Loading...</span>
-              ) : (
-                <span className="text-green-500 font-bold">
-                  ₹{(verifiedFinalBalance !== null ? verifiedFinalBalance : balance).toFixed(2)}
-                </span>
-              )}
+              <FinalBalanceDisplay sessionId={sessionId} />
             </div>
             <p className="text-gray-400 mt-2">Final Balance</p>
           </div>
@@ -2912,6 +3209,7 @@ function Game() {
                 {stockPerformance
                   .filter(stock => stock.change > 0)
                   .sort((a, b) => b.change - a.change)
+                  .slice(0, 3)
                   .map(stock => (
                     <div key={stock.name} className="flex justify-between items-center">
                       <span className="text-white">{stock.name}</span>
@@ -2933,6 +3231,7 @@ function Game() {
                 {stockPerformance
                   .filter(stock => stock.change < 0)
                   .sort((a, b) => a.change - b.change)
+                  .slice(0, 3)
                   .map(stock => (
                     <div key={stock.name} className="flex justify-between items-center">
                       <span className="text-white">{stock.name}</span>

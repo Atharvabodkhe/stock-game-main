@@ -48,6 +48,49 @@ const GameSessionItem: React.FC<GameSessionItemProps> = ({
     });
   };
 
+  // Calculate the balance from actions
+  const calculateBalanceFromActions = () => {
+    if (!session.actions || session.actions.length === 0) {
+      return null;
+    }
+    
+    // Sort actions by timestamp
+    const sortedActions = [...session.actions].sort((a, b) => {
+      try {
+        return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+      } catch (e) {
+        return 0;
+      }
+    });
+    
+    // Calculate running balance
+    let balance = 10000; // Start with initial balance
+    
+    for (const action of sortedActions) {
+      const actionType = (action.action_type || action.action || '').toLowerCase();
+      const price = typeof action.price === 'number' ? action.price : parseFloat(String(action.price)) || 0;
+      const quantity = action.quantity || 1;
+      const cost = price * quantity;
+      
+      if (actionType === 'buy') {
+        balance -= cost;
+      } else if (actionType === 'sell') {
+        balance += cost;
+      }
+    }
+    
+    return balance;
+  };
+  
+  // Get the most accurate balance
+  const calculatedBalance = calculateBalanceFromActions();
+  const displayBalance = calculatedBalance !== null ? calculatedBalance : 
+    session.final_balance && Math.abs(session.final_balance - 10000) > 0.01
+      ? session.final_balance
+      : session.game_results && session.game_results[0]?.final_balance
+        ? session.game_results[0].final_balance
+        : 10000;
+
   return (
     <div className="bg-gray-800 rounded-lg p-6">
       <div className="flex justify-between items-center mb-4">
@@ -56,13 +99,7 @@ const GameSessionItem: React.FC<GameSessionItemProps> = ({
         </h2>
         <div className="flex items-center gap-4">
           <span className="text-green-500 font-semibold text-lg">
-            Final Balance: ₹
-            {/* Prioritize the balance directly from game_sessions as it should be most accurate */}
-            {session.final_balance && Math.abs(session.final_balance - 10000) > 0.01
-              ? session.final_balance.toFixed(2)
-              : session.game_results && session.game_results[0]?.final_balance
-                ? session.game_results[0].final_balance.toFixed(2)
-                : "10000.00"}
+            Final Balance: ₹{displayBalance.toFixed(2)}
           </span>
           <button
             onClick={onToggleExpand}
@@ -82,13 +119,7 @@ const GameSessionItem: React.FC<GameSessionItemProps> = ({
           {session.actions.length > 0 ? (
             <TradingAnalysisWrapper 
               actions={session.actions}
-              finalBalance={
-                session.final_balance && Math.abs(session.final_balance - 10000) > 0.01
-                  ? session.final_balance
-                  : session.game_results && session.game_results[0]?.final_balance
-                    ? session.game_results[0].final_balance
-                    : 10000
-              }
+              finalBalance={displayBalance}
             />
           ) : (
             <div className="bg-gray-700 p-8 rounded-lg text-center">

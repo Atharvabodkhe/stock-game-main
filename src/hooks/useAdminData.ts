@@ -41,7 +41,7 @@ export const useAdminData = (isAdmin: boolean) => {
                   user_id,
                   status,
                   session_id,
-                  user:users(name, email)
+                  user:users(id, name, email)
                 `)
                 .eq('room_id', room.id);
 
@@ -98,7 +98,7 @@ export const useAdminData = (isAdmin: boolean) => {
                   status,
                   completed_at,
                   session_id,
-                  user:users(name, email)
+                  user:users(id, name, email)
                 `)
                 .eq('room_id', room.id);
 
@@ -220,7 +220,7 @@ export const useAdminData = (isAdmin: boolean) => {
         .from('game_results')
         .select(`
           *,
-          user:users!user_id(name, email),
+          user:users!user_id(id, name, email),
           game_session:game_sessions!session_id(personality_report, trading_history)
         `)
         .eq('room_id', roomId)

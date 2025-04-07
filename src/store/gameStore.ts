@@ -896,6 +896,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     const avgLevelPrice = pricePoints.reduce((sum, price) => sum + price, 0) / pricePoints.length;
     const totalCost = avgLevelPrice * quantity;
     
+    // Check if player has sufficient balance before proceeding
+    if (totalCost > state.balance) {
+      // Return the cost without updating player holdings
+      return totalCost;
+    }
+    
     // Update player holdings
     set(state => {
       const holdings = [...state.playerHoldings];
@@ -929,7 +935,11 @@ export const useGameStore = create<GameState>((set, get) => ({
         });
       }
       
-      return { playerHoldings: holdings };
+      // Update balance by subtracting the cost
+      return { 
+        playerHoldings: holdings,
+        balance: state.balance - totalCost 
+      };
     });
     
     return totalCost;
@@ -972,7 +982,11 @@ export const useGameStore = create<GameState>((set, get) => ({
         });
       }
       
-      return { playerHoldings: holdings };
+      // Update balance with the sale proceeds
+      return { 
+        playerHoldings: holdings,
+        balance: state.balance + saleValue
+      };
     });
     
     return saleValue;
