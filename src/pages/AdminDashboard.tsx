@@ -125,13 +125,6 @@ function AdminDashboard() {
           retryCount={retryCount} 
           maxRetries={maxRetries} 
         />
-
-        <div className="flex justify-between items-center mb-8">
-          <h1 className="text-3xl font-bold">Admin Dashboard</h1>
-          <div className="flex space-x-4">
-            {/* ... existing controls ... */}
-          </div>
-        </div>
         
         {/* Level selector */}
         <div className="bg-gray-800 rounded-lg p-6 mb-8">
